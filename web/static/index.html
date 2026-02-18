@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Player</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>YouTube Player</h1>
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="Search videos..." autofocus>
+                <button id="search-btn">Search</button>
+            </div>
+        </header>
+
+        <main>
+            <div id="player-container" class="hidden">
+                <div class="player-header">
+                    <div class="player-info">
+                        <h2 id="video-title"></h2>
+                        <p id="video-meta"></p>
+                    </div>
+                    <span id="time-display"></span>
+                    <button id="close-player">Close</button>
+                </div>
+                <video id="video-player" controls autoplay></video>
+                <div id="download-progress" class="hidden">
+                    <div id="progress-bar">
+                        <div id="progress-fill"></div>
+                    </div>
+                    <span id="progress-text">Starting...</span>
+                </div>
+            </div>
+
+            <div id="loading" class="hidden">
+                <div class="spinner"></div>
+                <p id="loading-message">Loading...</p>
+            </div>
+
+            <div id="video-grid"></div>
+
+            <div id="load-more-container" class="hidden">
+                <button id="load-more-btn">Load More</button>
+            </div>
+
+            <div id="no-results" class="hidden">
+                <p>No videos found. Try a different search.</p>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
