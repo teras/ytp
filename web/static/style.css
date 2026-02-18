@@ -21,6 +21,78 @@ header {
     margin-bottom: 30px;
 }
 
+.settings-dropdown {
+    position: relative;
+}
+
+#settings-btn {
+    padding: 12px 14px;
+    font-size: 18px;
+    background-color: #303030;
+    color: #aaa;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+#settings-btn:hover {
+    background-color: #3f3f3f;
+    color: #fff;
+}
+
+.dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 8px;
+    background-color: #212121;
+    border: 1px solid #3a3a3a;
+    border-radius: 12px;
+    padding: 12px;
+    min-width: 240px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.dropdown-menu.show {
+    display: block;
+}
+
+.dropdown-label {
+    font-size: 12px;
+    color: #717171;
+    margin-bottom: 10px;
+}
+
+.chip-group {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.chip {
+    padding: 6px 12px;
+    font-size: 12px;
+    background-color: #303030;
+    color: #aaa;
+    border: none;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.chip:hover {
+    background-color: #404040;
+    color: #fff;
+}
+
+.chip.active {
+    background-color: #065fd4;
+    color: #fff;
+}
+
 h1 {
     font-size: 1.8rem;
     margin-bottom: 20px;
@@ -164,22 +236,85 @@ h1 {
     color: #aaa;
 }
 
-#time-display {
-    font-size: 14px;
-    color: #fff;
-    font-family: monospace;
+/* Download pill button */
+#download-pill {
+    position: relative;
+    display: flex;
     margin-right: 15px;
-    white-space: nowrap;
 }
 
-#quality-badge {
-    font-size: 12px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    margin-right: 15px;
-    font-weight: bold;
+#download-action {
+    padding: 8px 14px;
+    font-size: 13px;
     background-color: #065fd4;
     color: #fff;
+    border: none;
+    border-radius: 18px 0 0 18px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+
+#download-action:hover {
+    background-color: #0b7dda;
+}
+
+#download-gear {
+    padding: 8px 10px;
+    font-size: 13px;
+    background-color: #0550b0;
+    color: #fff;
+    border: none;
+    border-left: 1px solid rgba(255,255,255,0.2);
+    border-radius: 0 18px 18px 0;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+#download-gear:hover {
+    background-color: #0660c0;
+}
+
+.quality-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 2px;
+    background-color: #212121;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    padding: 6px 0;
+    min-width: 140px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.quality-menu .quality-option {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: #f1f1f1;
+    cursor: pointer;
+    transition: background-color 0.15s;
+}
+
+.quality-menu .quality-option:hover {
+    background-color: #303030;
+}
+
+.quality-menu .quality-option.selected {
+    background-color: #065fd4;
+    color: #fff;
+}
+
+.quality-menu .quality-option.selected .size {
+    color: rgba(255,255,255,0.7);
+}
+
+.quality-menu .quality-option .size {
+    color: #717171;
+    font-size: 12px;
 }
 
 #close-player {
@@ -203,94 +338,46 @@ h1 {
     display: block;
 }
 
-#download-offer {
+#cancel-download-btn {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 20px;
-    background-color: #1a1a1a;
-}
-
-#download-offer-label {
-    font-size: 13px;
-    color: #aaa;
-}
-
-#download-buttons {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-
-.download-btn {
-    padding: 6px 12px;
-    font-size: 13px;
-    background-color: #065fd4;
+    gap: 6px;
+    padding: 0 8px 0 12px;
+    height: 28px;
+    font-size: 12px;
+    background-color: #cc3333;
     color: #fff;
     border: none;
     border-radius: 14px;
     cursor: pointer;
-    font-weight: 500;
-    transition: background-color 0.2s;
-}
-
-.download-btn:hover {
-    background-color: #0b7dda;
-}
-
-.download-btn:disabled {
-    background-color: #303030;
-    cursor: not-allowed;
-}
-
-.download-btn .size {
-    opacity: 0.7;
-    font-weight: normal;
-}
-
-#download-progress {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 20px;
-    background-color: #1a1a1a;
-}
-
-#progress-bar {
-    flex: 1;
-    height: 6px;
-    background-color: #303030;
-    border-radius: 3px;
-    overflow: hidden;
-}
-
-#progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #ff0000, #ff4444);
-    width: 0%;
-    transition: width 0.3s ease;
-}
-
-#progress-text {
-    font-size: 12px;
-    color: #aaa;
-    min-width: 140px;
-}
-
-#cancel-download-btn {
-    padding: 4px 10px;
-    font-size: 12px;
-    background-color: #303030;
-    color: #aaa;
-    border: none;
-    border-radius: 12px;
-    cursor: pointer;
+    margin-right: 15px;
     transition: background-color 0.2s;
 }
 
 #cancel-download-btn:hover {
-    background-color: #ff4444;
-    color: #fff;
+    background-color: #ee4444;
+}
+
+.progress-ring {
+    width: 20px;
+    height: 20px;
+    transform: rotate(-90deg);
+}
+
+.progress-ring-bg {
+    fill: none;
+    stroke: rgba(255,255,255,0.3);
+    stroke-width: 5;
+}
+
+.progress-ring-fill {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 5;
+    stroke-linecap: round;
+    stroke-dasharray: 62.83;
+    stroke-dashoffset: 62.83;
+    transition: stroke-dashoffset 0.3s ease;
 }
 
 @keyframes spin {
@@ -360,6 +447,14 @@ h1 {
 @media (max-width: 600px) {
     .container { padding: 15px; }
     h1 { font-size: 1.4rem; }
-    .search-box { flex-direction: column; }
+    .search-box { flex-wrap: wrap; max-width: 100%; }
+    #search-input { flex: 1 1 100%; }
+    #search-btn { flex: 1; }
     #video-grid { grid-template-columns: 1fr; }
+    /* Bigger dropdown buttons on mobile */
+    .dropdown-menu { min-width: 280px; padding: 16px; }
+    .chip { padding: 10px 16px; font-size: 14px; }
+    .dropdown-label { font-size: 14px; margin-bottom: 12px; }
+    .quality-menu { min-width: 180px; }
+    .quality-menu .quality-option { padding: 12px 16px; font-size: 15px; }
 }

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>YouTube Player</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23cc0000'/><polygon points='40,30 40,70 75,50' fill='white'/></svg>">
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
@@ -14,6 +15,27 @@
             <div class="search-box">
                 <input type="text" id="search-input" placeholder="Search videos..." autofocus>
                 <button id="search-btn">Search</button>
+                <div class="settings-dropdown">
+                    <button id="settings-btn" title="Settings">&#9881;</button>
+                    <div class="dropdown-menu" id="settings-menu">
+                        <div class="dropdown-label">Auto-download videos under:</div>
+                        <div class="chip-group" id="auto-dl-chips">
+                            <button class="chip" data-value="0">Off</button>
+                            <button class="chip" data-value="5">5m</button>
+                            <button class="chip" data-value="10">10m</button>
+                            <button class="chip active" data-value="15">15m</button>
+                            <button class="chip" data-value="30">30m</button>
+                            <button class="chip" data-value="9999">All</button>
+                        </div>
+                        <div class="dropdown-label" style="margin-top: 12px;">Max download quality:</div>
+                        <div class="chip-group" id="quality-chips">
+                            <button class="chip" data-value="720">720p</button>
+                            <button class="chip active" data-value="1080">1080p</button>
+                            <button class="chip" data-value="1440">1440p</button>
+                            <button class="chip" data-value="2160">4K</button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -24,22 +46,23 @@
                         <h2 id="video-title"></h2>
                         <p id="video-meta"></p>
                     </div>
-                    <span id="time-display"></span>
-                    <span id="quality-badge"></span>
+                    <div id="download-pill" class="hidden">
+                        <button id="download-action">Download</button>
+                        <button id="download-gear">&#9881;</button>
+                        <div id="download-quality-menu" class="quality-menu hidden">
+                            <!-- Quality options populated by JS -->
+                        </div>
+                    </div>
+                    <button id="cancel-download-btn" class="hidden">
+                        <span>Cancel</span>
+                        <svg class="progress-ring" viewBox="0 0 28 28">
+                            <circle class="progress-ring-bg" cx="14" cy="14" r="10"></circle>
+                            <circle class="progress-ring-fill" cx="14" cy="14" r="10"></circle>
+                        </svg>
+                    </button>
                     <button id="close-player">Close</button>
                 </div>
                 <video id="video-player" controls autoplay></video>
-                <div id="download-offer" class="hidden">
-                    <span id="download-offer-label">Download:</span>
-                    <div id="download-buttons"></div>
-                </div>
-                <div id="download-progress" class="hidden">
-                    <div id="progress-bar">
-                        <div id="progress-fill"></div>
-                    </div>
-                    <span id="progress-text">Starting...</span>
-                    <button id="cancel-download-btn">Cancel</button>
-                </div>
             </div>
 
             <div id="video-grid"></div>
