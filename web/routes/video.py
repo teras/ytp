@@ -1,7 +1,6 @@
 """Video routes: info, subtitle, stream-live."""
 import asyncio
 import logging
-import time
 
 import httpx
 import yt_dlp
@@ -18,10 +17,6 @@ router = APIRouter(prefix="/api")
 
 # Cache subtitle URLs per video (populated by /api/info, consumed by /api/subtitle)
 _subtitle_cache: dict = {}
-
-# Cache subtitle download failures to avoid hammering YouTube with 429s
-_subtitle_fail_cache: dict = {}
-_SUBTITLE_FAIL_TTL = 300  # 5 minutes
 
 
 @router.get("/info/{video_id}")
@@ -51,14 +46,21 @@ async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
                 cache_entry[lang] = {'auto': False, 'url': vtt['url']}
                 subtitle_tracks.append({'lang': lang, 'label': name, 'auto': False})
 
+        # Only include the original-language auto-caption (translations get 429'd by YouTube)
+        video_lang = info.get('language', '')
         for lang, formats in info.get('automatic_captions', {}).items():
             if lang in _SKIP_LANGS or lang in cache_entry:
                 continue
+            # Skip translated auto-captions: check if URL has &tlang (= translation)
             vtt = next((f for f in formats if f.get('ext') == 'vtt'), None)
-            if vtt:
-                name = next((f.get('name') for f in formats if f.get('name')), lang)
-                cache_entry[lang] = {'auto': True, 'url': vtt['url']}
-                subtitle_tracks.append({'lang': lang, 'label': f"{name} (auto)", 'auto': True})
+            if not vtt:
+                continue
+            url = vtt.get('url', '')
+            if '&tlang=' in url or '?tlang=' in url:
+                continue  # translated auto-caption, will 429
+            name = next((f.get('name') for f in formats if f.get('name')), lang)
+            cache_entry[lang] = {'auto': True, 'url': url}
+            subtitle_tracks.append({'lang': lang, 'label': name, 'auto': True})
 
         _subtitle_cache[video_id] = cache_entry
 
@@ -79,7 +81,8 @@ async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
 
 @router.get("/subtitle/{video_id}")
 async def get_subtitle(video_id: str, lang: str, auth: bool = Depends(require_auth)):
-    """Proxy a subtitle VTT file."""
+    """Proxy a subtitle VTT file (original language or manual subs only)."""
+    # Check local cache first
     def _find_local():
         matches = list(CACHE_DIR.glob(f"{video_id}*.{lang}.vtt"))
         return matches[0] if matches else None
@@ -88,12 +91,7 @@ async def get_subtitle(video_id: str, lang: str, auth: bool = Depends(require_au
     if found:
         return FileResponse(found, media_type='text/vtt', headers={'Cache-Control': 'max-age=3600'})
 
-    fail_key = (video_id, lang)
-    if fail_key in _subtitle_fail_cache:
-        if time.time() - _subtitle_fail_cache[fail_key] < _SUBTITLE_FAIL_TTL:
-            raise HTTPException(status_code=404, detail="Subtitle unavailable (rate-limited)")
-        del _subtitle_fail_cache[fail_key]
-
+    # Fetch from cached YouTube URL
     cache = _subtitle_cache.get(video_id, {})
     sub_info = cache.get(lang) or cache.get(lang.split('-')[0])
     if sub_info and sub_info.get('url'):
@@ -105,38 +103,11 @@ async def get_subtitle(video_id: str, lang: str, auth: bool = Depends(require_au
                 out_path.write_bytes(resp.content)
                 return Response(resp.content, media_type='text/vtt',
                                 headers={'Cache-Control': 'max-age=3600'})
-        except Exception:
-            pass
+            log.warning(f"Subtitle fetch {lang}: HTTP {resp.status_code}")
+        except Exception as e:
+            log.warning(f"Subtitle fetch {lang} failed: {e}")
 
-    yt_url = _yt_url(video_id)
-    out_tpl = str(CACHE_DIR / video_id)
-
-    def _download_sub():
-        opts = {
-            **YDL_OPTS,
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': [lang],
-            'subtitlesformat': 'vtt',
-            'convertsubtitles': 'vtt',
-            'outtmpl': out_tpl,
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([yt_url])
-
-    try:
-        await asyncio.to_thread(_download_sub)
-    except Exception as e:
-        _subtitle_fail_cache[fail_key] = time.time()
-        raise HTTPException(status_code=500, detail=str(e))
-
-    found = _find_local()
-    if not found:
-        _subtitle_fail_cache[fail_key] = time.time()
-        raise HTTPException(status_code=404, detail="Subtitle not found")
-
-    return FileResponse(found, media_type='text/vtt', headers={'Cache-Control': 'max-age=3600'})
+    raise HTTPException(status_code=404, detail="Subtitle not available")
 
 
 @router.get("/stream-live/{video_id}")

@@ -102,17 +102,30 @@ function updateSubtitleBtn(activeLang) {
 function renderSubtitleMenu() {
     const saved = localStorage.getItem('subtitle_lang');
     const activeLang = (saved && saved !== 'off') ? saved : null;
-    const allItems = [{ lang: null, label: 'Off', auto: false }, ...subtitleTracks];
 
-    let items;
+    // Order: Off, last selected (if any), English, then rest alphabetically
+    const offItem = { lang: null, label: 'Off' };
+    const promoted = new Set([activeLang]);
+    const items = [offItem];
+
+    // Last selected language (if available for this video)
     if (activeLang) {
-        const activeItem = allItems.find(t => t.lang === activeLang);
-        items = activeItem
-            ? [activeItem, ...allItems.filter(t => t.lang !== activeLang)]
-            : allItems;
-    } else {
-        items = allItems;
+        const activeTrack = subtitleTracks.find(t => t.lang === activeLang);
+        if (activeTrack) items.push(activeTrack);
     }
+
+    // English (if not already the active language)
+    const enTrack = subtitleTracks.find(t => t.lang === 'en' || t.lang.startsWith('en-'));
+    if (enTrack && enTrack.lang !== activeLang) {
+        items.push(enTrack);
+        promoted.add(enTrack.lang);
+    }
+
+    // Rest, sorted by label
+    const rest = subtitleTracks
+        .filter(t => !promoted.has(t.lang))
+        .sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+    items.push(...rest);
 
     subtitleMenu.innerHTML = items.map(t => {
         const isActive = t.lang === activeLang;
