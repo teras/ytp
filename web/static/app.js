@@ -166,6 +166,11 @@ function handleInitialRoute() {
 // ── Player ──────────────────────────────────────────────────────────────────
 
 function stopPlayer() {
+    savePosition();
+    if (positionSaveTimer) {
+        clearTimeout(positionSaveTimer);
+        positionSaveTimer = null;
+    }
     if (dashPlayer) {
         dashPlayer.destroy();
         dashPlayer = null;
@@ -264,6 +269,7 @@ async function playVideo(videoId, title, channel, duration) {
 
         populateQualityMenu();
         qualitySelector.classList.remove('hidden');
+        restorePosition(videoId);
     });
 
     dashPlayer.on(dashjs.MediaPlayer.events.QUALITY_CHANGE_RENDERED, (e) => {
@@ -296,6 +302,49 @@ function linkifyText(text) {
     const escaped = escapeHtml(text);
     return escaped.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
 }
+
+// ── Playback Position ───────────────────────────────────────────────────────
+
+let positionSaveTimer = null;
+
+function savePosition() {
+    if (!currentVideoId || !videoPlayer.currentTime) return;
+    // Don't save if near the end (within 30s or 95%) — treat as "watched"
+    const dur = videoPlayer.duration || 0;
+    if (dur > 0 && (videoPlayer.currentTime > dur - 30 || videoPlayer.currentTime / dur > 0.95)) {
+        sessionStorage.removeItem(`pos:${currentVideoId}`);
+        return;
+    }
+    if (videoPlayer.currentTime > 5) {
+        sessionStorage.setItem(`pos:${currentVideoId}`, videoPlayer.currentTime.toFixed(1));
+    }
+}
+
+function restorePosition(videoId) {
+    const saved = sessionStorage.getItem(`pos:${videoId}`);
+    if (saved) {
+        const t = parseFloat(saved);
+        if (t > 5) {
+            videoPlayer.currentTime = t;
+        }
+    }
+}
+
+videoPlayer.addEventListener('timeupdate', () => {
+    if (!positionSaveTimer) {
+        positionSaveTimer = setTimeout(() => {
+            savePosition();
+            positionSaveTimer = null;
+        }, 5000);
+    }
+});
+
+videoPlayer.addEventListener('ended', () => {
+    if (currentVideoId) {
+        sessionStorage.removeItem(`pos:${currentVideoId}`);
+    }
+});
+
 
 // ── Event Listeners ─────────────────────────────────────────────────────────
 

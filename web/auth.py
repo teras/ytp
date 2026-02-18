@@ -4,6 +4,8 @@ import os
 import secrets
 import time
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException, Request, Response, Depends, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
@@ -136,6 +138,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <body>
     <form class="login-box" method="POST" action="/login">
         {{ERROR_PLACEHOLDER}}
+        <input type="hidden" name="next" value="{{NEXT_URL}}">
         <input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">
         <label class="remember-row">
             <input type="checkbox" name="remember" value="1">
@@ -150,9 +153,12 @@ LOGIN_PAGE = """<!DOCTYPE html>
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 def _serve_spa(request: Request):
-    """Serve index.html or redirect to login."""
+    """Serve index.html or redirect to login, preserving the original URL."""
     if AUTH_PASSWORD and not verify_session(request):
-        return RedirectResponse(url="/login", status_code=302)
+        next_url = str(request.url.path)
+        if request.url.query:
+            next_url += f"?{request.url.query}"
+        return RedirectResponse(url=f"/login?next={quote(next_url, safe='')}", status_code=302)
     return FileResponse("static/index.html")
 
 
@@ -172,11 +178,11 @@ async def channel_page(request: Request, channel_id: str):
 
 
 @router.get("/login")
-async def login_page(request: Request, error: str = ""):
+async def login_page(request: Request, error: str = "", next: str = "/"):
     if not AUTH_PASSWORD:
         return RedirectResponse(url="/", status_code=302)
     if verify_session(request):
-        return RedirectResponse(url="/", status_code=302)
+        return RedirectResponse(url=next or "/", status_code=302)
 
     ip = get_client_ip(request)
     blocked, remaining = is_ip_blocked(ip)
@@ -194,18 +200,25 @@ async def login_page(request: Request, error: str = ""):
     else:
         error_html = ""
 
-    return HTMLResponse(LOGIN_PAGE.replace("{{ERROR_PLACEHOLDER}}", error_html))
+    # Only allow relative URLs to prevent open redirect
+    safe_next = next if next.startswith("/") else "/"
+    html = LOGIN_PAGE.replace("{{ERROR_PLACEHOLDER}}", error_html)
+    html = html.replace("{{NEXT_URL}}", safe_next)
+    return HTMLResponse(html)
 
 
 @router.post("/login")
-async def do_login(request: Request, response: Response, password: str = Form(...), remember: str = Form(default="")):
+async def do_login(request: Request, response: Response, password: str = Form(...), remember: str = Form(default=""), next: str = Form(default="/")):
     if not AUTH_PASSWORD:
         return RedirectResponse(url="/", status_code=302)
+
+    # Only allow relative URLs to prevent open redirect
+    redirect_to = next if next.startswith("/") else "/"
 
     ip = get_client_ip(request)
     blocked, remaining = is_ip_blocked(ip)
     if blocked:
-        return RedirectResponse(url="/login", status_code=302)
+        return RedirectResponse(url=f"/login?next={quote(redirect_to, safe='')}", status_code=302)
 
     if password == AUTH_PASSWORD:
         clear_failures(ip)
@@ -213,7 +226,7 @@ async def do_login(request: Request, response: Response, password: str = Form(..
         expiry = time.time() + (30 * 86400 if remember else 86400)
         AUTH_SESSIONS[token] = expiry
 
-        response = RedirectResponse(url="/", status_code=302)
+        response = RedirectResponse(url=redirect_to, status_code=302)
         response.set_cookie(
             key="ytp_session",
             value=token,
@@ -226,7 +239,7 @@ async def do_login(request: Request, response: Response, password: str = Form(..
     else:
         record_failure(ip)
         log.warning(f"Failed login attempt from {ip}")
-        return RedirectResponse(url="/login?error=Invalid+password", status_code=302)
+        return RedirectResponse(url=f"/login?error=Invalid+password&next={quote(redirect_to, safe='')}", status_code=302)
 
 
 @router.get("/logout")
