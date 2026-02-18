@@ -13,28 +13,7 @@
         <header>
             <div class="header-top">
                 <h1>YTP</h1>
-                <div class="settings-dropdown">
-                    <button id="settings-btn" title="Settings">&#9881;</button>
-                    <div class="dropdown-menu" id="settings-menu">
-                        <div class="dropdown-label">Auto-download videos under:</div>
-                        <div class="chip-group" id="auto-dl-chips">
-                            <button class="chip active" data-value="0">Off</button>
-                            <button class="chip" data-value="5">5m</button>
-                            <button class="chip" data-value="10">10m</button>
-                            <button class="chip" data-value="15">15m</button>
-                            <button class="chip" data-value="30">30m</button>
-                            <button class="chip" data-value="9999">All</button>
-                        </div>
-                        <div class="dropdown-label" style="margin-top: 12px;">Max download quality:</div>
-                        <div class="chip-group" id="quality-chips">
-                            <button class="chip" data-value="720">720p</button>
-                            <button class="chip active" data-value="1080">1080p</button>
-                            <button class="chip" data-value="1440">1440p</button>
-                            <button class="chip" data-value="2160">4K</button>
-                        </div>
-                        <a href="/logout" class="logout-link">Logout</a>
-                    </div>
-                </div>
+                <a href="/logout" class="header-logout">Logout</a>
             </div>
             <div class="search-box">
                 <input type="text" id="search-input" placeholder="Search videos..." autofocus>
@@ -71,19 +50,10 @@
                                     <p id="video-meta"></p>
                                 </div>
                                 <div class="video-info-right">
-                                    <button id="cancel-download-btn" class="hidden">
-                                        <span>Cancel</span>
-                                        <svg class="progress-ring" viewBox="0 0 28 28">
-                                            <circle class="progress-ring-bg" cx="14" cy="14" r="10"></circle>
-                                            <circle class="progress-ring-fill" cx="14" cy="14" r="10"></circle>
-                                        </svg>
-                                    </button>
-                                    <div id="download-pill" class="hidden">
-                                        <button id="download-action">Download</button>
-                                        <button id="download-gear">&#9881;</button>
-                                        <div id="download-quality-menu" class="quality-menu hidden"></div>
+                                    <div id="quality-selector" class="quality-selector hidden">
+                                        <button id="quality-btn" class="quality-btn">1080p</button>
+                                        <div id="quality-menu" class="quality-menu hidden"></div>
                                     </div>
-                                    <span id="resolution-badge" class="resolution-badge hidden">720p</span>
                                     <div id="subtitle-btn-container" class="hidden">
                                         <button id="subtitle-btn" class="cc-btn">CC</button>
                                         <div id="subtitle-menu" class="subtitle-menu hidden"></div>
@@ -108,7 +78,6 @@
     <script src="/static/app.js"></script>
     <script src="/static/search.js"></script>
     <script src="/static/subtitles.js"></script>
-    <script src="/static/download.js"></script>
     <script>handleInitialRoute();</script>
 </body>
 </html>

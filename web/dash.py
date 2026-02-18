@@ -122,7 +122,7 @@ async def proxy_range_request(request: Request, video_url: str, filesize: int = 
 # ── DASH manifest endpoint ───────────────────────────────────────────────────
 
 @router.get("/api/dash/{video_id}")
-async def get_dash_manifest(video_id: str, quality: int = Query(default=1080), auth: bool = Depends(require_auth)):
+async def get_dash_manifest(video_id: str, quality: int = Query(default=4320), auth: bool = Depends(require_auth)):
     """Generate DASH MPD manifest with proxied URLs."""
 
     cached = _dash_cache.get(video_id)
