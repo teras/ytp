@@ -7,6 +7,7 @@ const listView = document.getElementById('list-view');
 const videoView = document.getElementById('video-view');
 const listHeader = document.getElementById('list-header');
 const listTitle = document.getElementById('list-title');
+const clearListBtn = document.getElementById('clear-list-btn');
 
 // Search
 const searchInput = document.getElementById('search-input');
@@ -55,7 +56,6 @@ let currentActiveHeight = 0;
 // Quality list: [{height, bandwidth, qualityIndex}]
 let videoQualities = [];
 let pendingSeek = null; // {time, play} — set during audio language switch
-let currentHlsManifestUrl = null; // base HLS manifest URL for multi-audio videos
 
 // ── Quality Selector ────────────────────────────────────────────────────────
 
@@ -105,11 +105,7 @@ function populateQualityMenu() {
                 qualityBtn.disabled = true;
                 qualityBtn.textContent = `\ud83c\udfac ${height}p\u2026`;
             } else {
-                currentActiveHeight = height;
-                qualityBtn.textContent = `\ud83c\udfac ${height}p`;
-                qualityMenu.querySelectorAll('.quality-option').forEach(o => {
-                    o.classList.toggle('selected', parseInt(o.dataset.height) === height);
-                });
+                updateQualityHighlight(height);
             }
         });
     });
@@ -121,6 +117,15 @@ function switchToQuality(entry) {
     } else if (currentPlayerType === 'hls') {
         hlsPlayer.currentLevel = entry.qualityIndex;
     }
+}
+
+function updateQualityHighlight(height) {
+    currentActiveHeight = height;
+    qualityBtn.textContent = `\ud83c\udfac ${height}p`;
+    qualityBtn.disabled = false;
+    qualityMenu.querySelectorAll('.quality-option').forEach(opt => {
+        opt.classList.toggle('selected', parseInt(opt.dataset.height) === height);
+    });
 }
 
 qualityBtn.addEventListener('click', (e) => {
@@ -199,6 +204,9 @@ function switchAudioLanguage(lang) {
 document.addEventListener('click', () => {
     qualityMenu.classList.add('hidden');
     audioMenu.classList.add('hidden');
+    subtitleMenu.classList.add('hidden');
+    const pm = document.getElementById('profile-menu');
+    if (pm) pm.classList.add('hidden');
 });
 
 // ── Routing ─────────────────────────────────────────────────────────────────
@@ -227,12 +235,6 @@ function navigateToChannel(channelId, channelName) {
     loadChannelVideos(channelId, channelName);
 }
 
-function navigateToSearch() {
-    history.pushState({ view: 'search' }, '', '/');
-    showListView();
-    restoreListCache();
-}
-
 window.addEventListener('popstate', (e) => {
     if (e.state?.view === 'video') {
         showVideoView();
@@ -257,33 +259,42 @@ function handleInitialRoute() {
     const params = new URLSearchParams(window.location.search);
 
     if (path === '/watch' && params.get('v')) {
+        const videoId = params.get('v');
+        history.replaceState({ view: 'video', videoId, title: '', channel: '', duration: 0 }, '', `/watch?v=${videoId}`);
         showVideoView();
-        playVideo(params.get('v'), '', '', 0);
+        playVideo(videoId, '', '', 0);
     } else if (path.startsWith('/channel/')) {
         const channelId = path.split('/channel/')[1];
+        history.replaceState({ view: 'channel', channelId, channelName: '' }, '', path);
         showListView();
         loadChannelVideos(channelId, '');
     } else if (path === '/history') {
+        history.replaceState({ view: 'history' }, '', '/history');
         showListView();
         loadHistory();
     } else if (path === '/favorites') {
+        history.replaceState({ view: 'favorites' }, '', '/favorites');
         showListView();
         loadFavorites();
+    } else {
+        history.replaceState({ view: 'search' }, '', '/');
     }
 }
 
-async function loadHistory() {
+async function loadListPage(endpoint, title, {showClear = false, removable = false} = {}) {
     listHeader.classList.remove('hidden');
-    listTitle.textContent = 'Watch History';
+    listTitle.textContent = title;
+    clearListBtn.classList.toggle('hidden', !showClear);
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
 
     try {
-        const resp = await fetch('/api/profiles/history?limit=50');
-        if (!resp.ok) throw new Error('Failed to load history');
+        const resp = await fetch(endpoint);
+        if (!resp.ok) throw new Error(`Failed to load ${title.toLowerCase()}`);
         const items = await resp.json();
         if (items.length === 0) {
             noResults.classList.remove('hidden');
+            clearListBtn.classList.add('hidden');
         } else {
             renderVideos(items.map(item => ({
                 id: item.video_id,
@@ -293,38 +304,48 @@ async function loadHistory() {
                 duration: item.duration,
                 duration_str: item.duration_str || '',
             })));
+            if (removable) {
+                videoGrid.querySelectorAll('.video-card').forEach(card => {
+                    const btn = document.createElement('button');
+                    btn.className = 'remove-entry-btn';
+                    btn.title = 'Remove from history';
+                    btn.textContent = '\u00d7';
+                    btn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        const resp = await fetch(`/api/profiles/history/${card.dataset.id}`, {method: 'DELETE'});
+                        if (resp.ok) {
+                            card.remove();
+                            if (!videoGrid.querySelector('.video-card')) {
+                                noResults.classList.remove('hidden');
+                                clearListBtn.classList.add('hidden');
+                            }
+                        }
+                    });
+                    card.style.position = 'relative';
+                    card.appendChild(btn);
+                });
+            }
         }
     } catch (err) {
         videoGrid.innerHTML = `<p class="error">Error: ${escapeHtml(err.message)}</p>`;
     }
 }
 
-async function loadFavorites() {
-    listHeader.classList.remove('hidden');
-    listTitle.textContent = 'Favorites';
-    videoGrid.innerHTML = '';
-    noResults.classList.add('hidden');
+function loadHistory() { return loadListPage('/api/profiles/history?limit=50', 'Watch History', {showClear: true, removable: true}); }
+function loadFavorites() { return loadListPage('/api/profiles/favorites?limit=50', 'Favorites'); }
 
+clearListBtn.addEventListener('click', async () => {
+    if (!confirm('Clear all watch history?')) return;
     try {
-        const resp = await fetch('/api/profiles/favorites?limit=50');
-        if (!resp.ok) throw new Error('Failed to load favorites');
-        const items = await resp.json();
-        if (items.length === 0) {
-            noResults.classList.remove('hidden');
-        } else {
-            renderVideos(items.map(item => ({
-                id: item.video_id,
-                title: item.title,
-                channel: item.channel,
-                thumbnail: item.thumbnail || `https://img.youtube.com/vi/${item.video_id}/hqdefault.jpg`,
-                duration: item.duration,
-                duration_str: item.duration_str || '',
-            })));
-        }
+        const resp = await fetch('/api/profiles/history', {method: 'DELETE'});
+        if (!resp.ok) throw new Error('Failed to clear history');
+        videoGrid.innerHTML = '';
+        noResults.classList.remove('hidden');
+        clearListBtn.classList.add('hidden');
     } catch (err) {
-        videoGrid.innerHTML = `<p class="error">Error: ${escapeHtml(err.message)}</p>`;
+        alert(err.message);
     }
-}
+});
 
 // ── Player ──────────────────────────────────────────────────────────────────
 
@@ -346,7 +367,6 @@ function stopPlayer() {
     currentAudioLang = null;
     hlsAudioTracks = [];
     pendingSeek = null;
-    currentHlsManifestUrl = null;
     qualitySelector.classList.add('hidden');
     qualityMenu.classList.add('hidden');
     audioBtnContainer.classList.add('hidden');
@@ -433,7 +453,6 @@ async function playVideo(videoId, title, channel, duration) {
 
         // If multi-audio available, show audio selector (HLS used only on language switch)
         if (info.has_multi_audio && info.hls_manifest_url && Hls.isSupported()) {
-            currentHlsManifestUrl = info.hls_manifest_url;
             try {
                 const audioResp = await fetch(`/api/hls/audio-tracks/${videoId}`);
                 const data = await audioResp.json();
@@ -478,9 +497,7 @@ function startDashPlayer(videoId) {
 
         if (targetEntry) {
             switchToQuality(targetEntry);
-            currentActiveHeight = targetHeight;
-            qualityBtn.textContent = `\ud83c\udfac ${targetHeight}p`;
-            qualityBtn.disabled = false;
+            updateQualityHighlight(targetHeight);
         }
 
         populateQualityMenu();
@@ -500,12 +517,7 @@ function startDashPlayer(videoId) {
         if (e.mediaType !== 'video') return;
         const entry = videoQualities.find(q => q.qualityIndex === e.newQuality);
         if (entry) {
-            currentActiveHeight = entry.height;
-            qualityBtn.textContent = `\ud83c\udfac ${entry.height}p`;
-            qualityBtn.disabled = false;
-            qualityMenu.querySelectorAll('.quality-option').forEach(opt => {
-                opt.classList.toggle('selected', parseInt(opt.dataset.height) === entry.height);
-            });
+            updateQualityHighlight(entry.height);
         }
     });
 }
@@ -527,9 +539,7 @@ function startHlsPlayer(videoId, manifestUrl) {
 
         if (targetEntry) {
             hlsPlayer.currentLevel = targetEntry.qualityIndex;
-            currentActiveHeight = targetHeight;
-            qualityBtn.textContent = `\ud83c\udfac ${targetHeight}p`;
-            qualityBtn.disabled = false;
+            updateQualityHighlight(targetHeight);
         }
 
         populateQualityMenu();
@@ -551,12 +561,7 @@ function startHlsPlayer(videoId, manifestUrl) {
         if (level) {
             const entry = videoQualities.find(q => q.height === level.height);
             if (entry) {
-                currentActiveHeight = entry.height;
-                qualityBtn.textContent = `\ud83c\udfac ${entry.height}p`;
-                qualityBtn.disabled = false;
-                qualityMenu.querySelectorAll('.quality-option').forEach(opt => {
-                    opt.classList.toggle('selected', parseInt(opt.dataset.height) === entry.height);
-                });
+                updateQualityHighlight(entry.height);
             }
         }
     });
@@ -579,14 +584,14 @@ function langName(code) {
     catch { return code.toUpperCase(); }
 }
 
+const _escapeDiv = document.createElement('div');
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    _escapeDiv.textContent = text;
+    return _escapeDiv.innerHTML;
 }
 
 function escapeAttr(text) {
-    return text.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function linkifyText(text) {
@@ -621,20 +626,6 @@ videoPlayer.addEventListener('timeupdate', () => {
         }, 5000);
     }
 });
-
-videoPlayer.addEventListener('ended', () => {
-    if (currentVideoId) {
-        // Save position 0 to mark as watched
-        if (typeof savePositionToAPI === 'function' && typeof currentProfile !== 'undefined' && currentProfile) {
-            fetch('/api/profiles/position', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ video_id: currentVideoId, position: 0 }),
-            }).catch(() => {});
-        }
-    }
-});
-
 
 // ── Event Listeners ─────────────────────────────────────────────────────────
 

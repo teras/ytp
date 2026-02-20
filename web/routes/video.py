@@ -3,37 +3,27 @@ import asyncio
 import logging
 import time
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import FileResponse, Response
 
 from auth import require_auth
 from dash import proxy_range_request
-from helpers import CACHE_DIR, format_number, register_cleanup, get_video_info as _cached_info
+from helpers import CACHE_DIR, format_number, register_cleanup, make_cache_cleanup, get_video_info as _cached_info, http_client
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
-_video_client = httpx.AsyncClient(timeout=15, follow_redirects=True)
+_SKIP_LANGS = {'live_chat', 'rechat'}
+
 
 # Cache subtitle URLs per video (populated by /api/info, consumed by /api/subtitle)
-# Each entry: {lang: {auto, url}, ..., "_created": float}
+# Each entry: {lang: {auto, url}, ..., "created": float}
 _subtitle_cache: dict = {}
 _SUBTITLE_CACHE_TTL = 5 * 3600
 
 
-def _cleanup_subtitle_cache():
-    now = time.time()
-    expired = [k for k, v in _subtitle_cache.items()
-               if now - v.get('_created', 0) > _SUBTITLE_CACHE_TTL]
-    for k in expired:
-        del _subtitle_cache[k]
-    if expired:
-        log.info(f"Cleaned {len(expired)} expired subtitle cache entries")
-
-
-register_cleanup(_cleanup_subtitle_cache)
+register_cleanup(make_cache_cleanup(_subtitle_cache, _SUBTITLE_CACHE_TTL, "subtitle"))
 
 
 @router.get("/info/{video_id}")
@@ -46,7 +36,6 @@ async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
         if upload_date and len(upload_date) == 8:
             upload_date = f"{upload_date[6:8]}/{upload_date[4:6]}/{upload_date[0:4]}"
 
-        _SKIP_LANGS = {'live_chat', 'rechat'}
         cache_entry: dict = {}
         subtitle_tracks = []
 
@@ -74,7 +63,7 @@ async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
             cache_entry[lang] = {'auto': True, 'url': vtt_url}
             subtitle_tracks.append({'lang': lang, 'label': name, 'auto': True})
 
-        cache_entry['_created'] = time.time()
+        cache_entry['created'] = time.time()
         _subtitle_cache[video_id] = cache_entry
 
         # Detect multi-audio: count distinct languages among audio formats
@@ -118,7 +107,7 @@ async def get_subtitle(video_id: str, lang: str, auth: bool = Depends(require_au
     sub_info = cache.get(lang) or cache.get(lang.split('-')[0])
     if sub_info and sub_info.get('url'):
         try:
-            resp = await _video_client.get(sub_info['url'])
+            resp = await http_client.get(sub_info['url'])
             if resp.status_code == 200:
                 out_path = CACHE_DIR / f"{video_id}.{lang}.vtt"
                 out_path.write_bytes(resp.content)

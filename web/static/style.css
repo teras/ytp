@@ -120,12 +120,59 @@ h1 {
 /* List Header (for channel pages) */
 #list-header {
     margin-bottom: 20px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
 }
 
 #list-header h2 {
     font-size: 1.4rem;
     font-weight: 500;
     color: #f1f1f1;
+}
+
+#clear-list-btn {
+    color: #888;
+    text-decoration: none;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 14px;
+    transition: all 0.2s;
+}
+
+.remove-entry-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.7);
+    color: #ccc;
+    font-size: 22px;
+    line-height: 32px;
+    text-align: center;
+    cursor: pointer;
+    padding: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 2;
+}
+
+.video-card:hover .remove-entry-btn {
+    opacity: 1;
+}
+
+.remove-entry-btn:hover {
+    background: rgba(255, 68, 68, 0.8);
+    color: #fff;
+}
+
+#clear-list-btn:hover {
+    color: #ff4444;
+    background-color: rgba(255, 68, 68, 0.1);
 }
 
 /* Channel link in video details */

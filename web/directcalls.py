@@ -19,9 +19,7 @@ import json
 import logging
 import re
 
-import httpx
-
-from helpers import _format_duration
+from helpers import _format_duration, http_client
 
 log = logging.getLogger(__name__)
 
@@ -29,28 +27,50 @@ log = logging.getLogger(__name__)
 
 _API_BASE = "https://www.youtube.com/youtubei/v1"
 
-_CLIENT_CONTEXT = {
-    "client": {
-        "clientName": "WEB",
-        "clientVersion": "2.20250219.01.00",
-        "hl": "en",
-        "gl": "US",
+_FALLBACK_CLIENT_VERSION = "2.20250219.01.00"
+_cached_client_version: str | None = None
+
+
+async def _fetch_client_version() -> str:
+    """Fetch current WEB client version from YouTube homepage. Cached after first call."""
+    global _cached_client_version
+    if _cached_client_version:
+        return _cached_client_version
+    try:
+        resp = await http_client.get("https://www.youtube.com/", headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        m = re.search(r'"clientVersion":"(\d+\.\d{8}\.\d+\.\d+)"', resp.text)
+        if m:
+            _cached_client_version = m.group(1)
+            log.info(f"InnerTube clientVersion: {_cached_client_version}")
+            return _cached_client_version
+    except Exception as e:
+        log.warning(f"Failed to fetch clientVersion: {e}")
+    _cached_client_version = _FALLBACK_CLIENT_VERSION
+    log.info(f"Using fallback clientVersion: {_FALLBACK_CLIENT_VERSION}")
+    return _cached_client_version
+
+
+def _build_context(version: str) -> dict:
+    return {
+        "client": {
+            "clientName": "WEB",
+            "clientVersion": version,
+            "hl": "en",
+            "gl": "US",
+        }
     }
-}
 
-_HEADERS = {
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "X-YouTube-Client-Name": "1",
-    "X-YouTube-Client-Version": "2.20250219.01.00",
-}
 
-# Reuse a single httpx client for all InnerTube API calls.
-# Protected by a lock since httpx.Client is not thread-safe and we call
-# from asyncio.to_thread() which may run concurrent requests.
-import threading
-_innertube_client = httpx.Client(timeout=30.0, headers=_HEADERS)
-_innertube_lock = threading.Lock()
+def _build_headers(version: str) -> dict:
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-YouTube-Client-Name": "1",
+        "X-YouTube-Client-Version": version,
+    }
 
 
 # ── Response parsers ─────────────────────────────────────────────────────────
@@ -116,27 +136,36 @@ def _extract_continuation_token(items: list) -> str | None:
     return None
 
 
+# ── InnerTube POST helper ────────────────────────────────────────────────────
+
+async def _innertube_post(endpoint: str, body: dict) -> dict:
+    """POST to an InnerTube endpoint and return parsed JSON.
+
+    Automatically injects 'context' with the current client version.
+    """
+    version = await _fetch_client_version()
+    body.setdefault("context", _build_context(version))
+    resp = await http_client.post(
+        f"{_API_BASE}/{endpoint}",
+        params={"prettyPrint": "false"},
+        headers=_build_headers(version),
+        json=body,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ── Search ───────────────────────────────────────────────────────────────────
 
-def search_first(query: str) -> tuple[list[dict], str | None]:
+async def search_first(query: str) -> tuple[list[dict], str | None]:
     """Initial search request.
 
     POST youtubei/v1/search with {"query": "...", "context": {...}}
     Returns (results, continuation_token).
     """
-    body = {
+    data = await _innertube_post("search", {
         "query": query,
-        "context": _CLIENT_CONTEXT,
-    }
-
-    with _innertube_lock:
-        resp = _innertube_client.post(
-            f"{_API_BASE}/search",
-            params={"prettyPrint": "false"},
-            json=body,
-        )
-    resp.raise_for_status()
-    data = resp.json()
+    })
 
     results = []
     token = None
@@ -176,25 +205,15 @@ def search_first(query: str) -> tuple[list[dict], str | None]:
     return results, token
 
 
-def search_next(continuation_token: str) -> tuple[list[dict], str | None]:
+async def search_next(continuation_token: str) -> tuple[list[dict], str | None]:
     """Paginated search request using a continuation token.
 
     POST youtubei/v1/search with {"continuation": "...", "context": {...}}
     Returns (results, next_continuation_token | None).
     """
-    body = {
+    data = await _innertube_post("search", {
         "continuation": continuation_token,
-        "context": _CLIENT_CONTEXT,
-    }
-
-    with _innertube_lock:
-        resp = _innertube_client.post(
-            f"{_API_BASE}/search",
-            params={"prettyPrint": "false"},
-            json=body,
-        )
-    resp.raise_for_status()
-    data = resp.json()
+    })
 
     results = []
     token = None
@@ -229,26 +248,16 @@ def search_next(continuation_token: str) -> tuple[list[dict], str | None]:
 _CHANNEL_VIDEOS_PARAMS = "EgZ2aWRlb3PyBgQKAjoA"
 
 
-def channel_first(channel_id: str) -> tuple[str, list[dict], str | None]:
+async def channel_first(channel_id: str) -> tuple[str, list[dict], str | None]:
     """Initial channel videos request.
 
     POST youtubei/v1/browse with browseId + Videos tab params.
     Returns (channel_name, results, continuation_token).
     """
-    body = {
+    data = await _innertube_post("browse", {
         "browseId": channel_id,
         "params": _CHANNEL_VIDEOS_PARAMS,
-        "context": _CLIENT_CONTEXT,
-    }
-
-    with _innertube_lock:
-        resp = _innertube_client.post(
-            f"{_API_BASE}/browse",
-            params={"prettyPrint": "false"},
-            json=body,
-        )
-    resp.raise_for_status()
-    data = resp.json()
+    })
 
     # Channel name from metadata or header
     channel_name = (data.get("metadata", {})
@@ -317,25 +326,15 @@ def channel_first(channel_id: str) -> tuple[str, list[dict], str | None]:
     return channel_name, results, token
 
 
-def channel_next(continuation_token: str) -> tuple[list[dict], str | None]:
+async def channel_next(continuation_token: str) -> tuple[list[dict], str | None]:
     """Paginated channel videos request using a continuation token.
 
     POST youtubei/v1/browse with {"continuation": "...", "context": {...}}
     Returns (results, next_continuation_token | None).
     """
-    body = {
+    data = await _innertube_post("browse", {
         "continuation": continuation_token,
-        "context": _CLIENT_CONTEXT,
-    }
-
-    with _innertube_lock:
-        resp = _innertube_client.post(
-            f"{_API_BASE}/browse",
-            params={"prettyPrint": "false"},
-            json=body,
-        )
-    resp.raise_for_status()
-    data = resp.json()
+    })
 
     results = []
     token = None
@@ -370,16 +369,6 @@ def channel_next(continuation_token: str) -> tuple[list[dict], str | None]:
 
 # ── Related Videos ───────────────────────────────────────────────────────────
 
-_async_client = httpx.AsyncClient(
-    timeout=30.0,
-    follow_redirects=True,
-    headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    },
-)
-
-
 async def fetch_related(video_id: str) -> list[dict]:
     """Fetch related videos for a given video ID.
 
@@ -392,14 +381,44 @@ async def fetch_related(video_id: str) -> list[dict]:
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     try:
-        resp = await _async_client.get(url)
+        resp = await http_client.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
         html = resp.text
 
-        match = re.search(r"var ytInitialData = ({.*?});", html)
+        match = re.search(r"var ytInitialData\s*=\s*\{", html)
         if not match:
             return []
 
-        data = json.loads(match.group(1))
+        # Extract JSON by counting braces (regex {.*?} is fragile with nested JSON)
+        start = match.end() - 1  # position of opening {
+        depth = 0
+        in_string = False
+        escape = False
+        end = start
+        for i in range(start, len(html)):
+            ch = html[i]
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        data = json.loads(html[start:end])
 
         contents = data.get("contents", {}).get("twoColumnWatchNextResults", {})
         secondary = (contents
@@ -413,7 +432,7 @@ async def fetch_related(video_id: str) -> list[dict]:
                 vm = item["lockupViewModel"]
                 content_id = vm.get("contentId", "")
 
-                if content_id.startswith("RD"):
+                if content_id.startswith(("RD", "PL")):
                     continue
 
                 metadata = vm.get("metadata", {}).get("lockupMetadataViewModel", {})

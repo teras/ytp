@@ -165,4 +165,4 @@ subtitleBtn.addEventListener('click', (e) => {
 });
 
 subtitleMenu.addEventListener('click', (e) => e.stopPropagation());
-document.addEventListener('click', () => subtitleMenu.classList.add('hidden'));
+// Menu closing handled by consolidated listener in app.js

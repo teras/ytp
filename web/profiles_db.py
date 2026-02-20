@@ -1,8 +1,12 @@
 """SQLite-backed profiles: preferences, watch history, favorites."""
+import logging
+import secrets
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).parent / "data"
 _DATA_DIR.mkdir(exist_ok=True)
@@ -53,6 +57,13 @@ CREATE TABLE IF NOT EXISTS favorites (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+    created_at REAL NOT NULL,
+    expiry REAL NOT NULL
 );
 """
 
@@ -118,16 +129,26 @@ def get_profile(profile_id: int) -> dict | None:
 def create_profile(name: str, pin: str | None = None, avatar_color: str = "#cc0000",
                     avatar_emoji: str = "") -> dict:
     now = time.time()
+    clean_name = name.strip()
+    clean_pin = pin if pin else None
     with _connect() as conn:
         # First profile becomes admin
         count = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
         is_admin = 1 if count == 0 else 0
         cur = conn.execute(
             "INSERT INTO profiles (name, avatar_color, avatar_emoji, pin, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (name.strip(), avatar_color, avatar_emoji, pin if pin else None, is_admin, now),
+            (clean_name, avatar_color, avatar_emoji, clean_pin, is_admin, now),
         )
-        profile_id = cur.lastrowid
-    return get_profile(profile_id)
+    return {
+        "id": cur.lastrowid,
+        "name": clean_name,
+        "avatar_color": avatar_color,
+        "avatar_emoji": avatar_emoji,
+        "has_pin": clean_pin is not None,
+        "is_admin": bool(is_admin),
+        "preferred_quality": 1080,
+        "subtitle_lang": "off",
+    }
 
 
 def delete_profile(profile_id: int) -> bool:
@@ -143,7 +164,7 @@ def verify_pin(profile_id: int, pin: str) -> bool:
         return False
     if r["pin"] is None:
         return True  # no PIN set
-    return r["pin"] == pin
+    return secrets.compare_digest(r["pin"], pin)
 
 
 def update_preferences(profile_id: int, quality: int | None = None, subtitle_lang: str | None = None):
@@ -191,6 +212,16 @@ def get_watch_history(profile_id: int, limit: int = 50, offset: int = 0) -> list
             (profile_id, limit, offset),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def clear_watch_history(profile_id: int):
+    with _connect() as conn:
+        conn.execute("DELETE FROM watch_history WHERE profile_id = ?", (profile_id,))
+
+
+def delete_history_entry(profile_id: int, video_id: str):
+    with _connect() as conn:
+        conn.execute("DELETE FROM watch_history WHERE profile_id = ? AND video_id = ?", (profile_id, video_id))
 
 
 def add_favorite(profile_id: int, video_id: str, title: str = "",
@@ -265,3 +296,84 @@ def get_app_password() -> str | None:
 
 def set_app_password(password: str | None):
     set_setting("app_password", password if password else None)
+
+
+# ── Long-term cleanup ───────────────────────────────────────────────────────
+
+def cleanup_old_history(max_age_days: int = 90):
+    """Delete watch history entries older than max_age_days."""
+    cutoff = time.time() - max_age_days * 86400
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM watch_history WHERE watched_at < ?", (cutoff,))
+        if cur.rowcount:
+            log.info(f"Cleaned {cur.rowcount} watch history entries older than {max_age_days} days")
+
+
+# ── Sessions (persistent) ─────────────────────────────────────────────────
+
+_SESSION_EXPIRY = 10 * 365 * 86400  # 10 years
+
+
+def create_session() -> tuple[str, dict]:
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    expiry = now + _SESSION_EXPIRY
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, profile_id, created_at, expiry) VALUES (?, NULL, ?, ?)",
+            (token, now, expiry),
+        )
+    return token, {"expiry": expiry, "profile_id": None}
+
+
+def get_session(token: str) -> dict | None:
+    with _connect() as conn:
+        r = conn.execute(
+            "SELECT token, profile_id, expiry FROM sessions WHERE token = ?", (token,)
+        ).fetchone()
+    if not r:
+        return None
+    if r["expiry"] < time.time():
+        delete_session(token)
+        return None
+    return {"expiry": r["expiry"], "profile_id": r["profile_id"]}
+
+
+def set_session_profile(token: str, profile_id: int | None):
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET profile_id = ? WHERE token = ?", (profile_id, token)
+        )
+
+
+def delete_session(token: str):
+    with _connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def clear_profile_from_sessions(profile_id: int):
+    """Clear profile_id from all sessions that have it (e.g. when profile is deleted)."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET profile_id = NULL WHERE profile_id = ?", (profile_id,)
+        )
+
+
+def cleanup_expired_sessions():
+    now = time.time()
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM sessions WHERE expiry < ?", (now,))
+        if cur.rowcount:
+            log.info(f"Cleaned {cur.rowcount} expired sessions")
+
+
+def _register_long_cleanup():
+    try:
+        from helpers import register_long_cleanup
+        register_long_cleanup(cleanup_old_history)
+        register_long_cleanup(cleanup_expired_sessions)
+    except ImportError:
+        pass
+
+
+_register_long_cleanup()

@@ -16,9 +16,10 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# State
-AUTH_SESSIONS: dict = {}   # token -> {"expiry": float, "searches": {}}
+# Brute-force protection (in-memory, resets on restart — that's fine)
 AUTH_FAILURES: dict = {}   # ip -> {"count": int, "blocked_until": float}
+
+_COOKIE_MAX_AGE = 10 * 365 * 86400  # 10 years
 
 
 def _get_password() -> str | None:
@@ -26,22 +27,19 @@ def _get_password() -> str | None:
     return profiles_db.get_app_password()
 
 
-def _cleanup_sessions():
+def _cleanup():
     now = time.time()
-    expired = [t for t, s in AUTH_SESSIONS.items() if now > s['expiry']]
-    for t in expired:
-        del AUTH_SESSIONS[t]
     # Clean old failure entries (>24h and not currently blocked)
     old_failures = [ip for ip, info in AUTH_FAILURES.items()
                     if info.get('blocked_until', 0) < now and
                     now - info.get('last_failure', 0) > 86400]
     for ip in old_failures:
         del AUTH_FAILURES[ip]
-    if expired or old_failures:
-        log.info(f"Cleaned {len(expired)} expired sessions, {len(old_failures)} old failure entries")
+    if old_failures:
+        log.info(f"Cleaned {len(old_failures)} old failure entries")
 
 
-register_cleanup(_cleanup_sessions)
+register_cleanup(_cleanup)
 
 
 def get_client_ip(request: Request) -> str:
@@ -78,25 +76,16 @@ def clear_failures(ip: str):
     AUTH_FAILURES.pop(ip, None)
 
 
-def _create_session(expiry: float) -> tuple[str, dict]:
-    """Create a new session and return (token, session_dict)."""
-    token = secrets.token_urlsafe(32)
-    session = {"expiry": expiry, "searches": {}, "profile_id": None}
-    AUTH_SESSIONS[token] = session
-    return token, session
-
-
 def get_session(request: Request) -> tuple[str, dict]:
-    """Get existing session or create a new one. Returns (token, session_dict)."""
+    """Get existing session from DB or create a new one. Returns (token, session_dict)."""
     token = request.cookies.get("ytp_session")
-    if token and token in AUTH_SESSIONS:
-        session = AUTH_SESSIONS[token]
-        if session['expiry'] > time.time():
+    if token:
+        session = profiles_db.get_session(token)
+        if session:
             return token, session
-        del AUTH_SESSIONS[token]
 
-    # Create session (profile selection will persist profile_id into it)
-    token, session = _create_session(time.time() + 24 * 3600)
+    # Create new persistent session
+    token, session = profiles_db.create_session()
     return token, session
 
 
@@ -104,10 +93,10 @@ def verify_session(request: Request) -> bool:
     if not _get_password():
         return True
     token = request.cookies.get("ytp_session")
-    if token and token in AUTH_SESSIONS:
-        if AUTH_SESSIONS[token]['expiry'] > time.time():
+    if token:
+        session = profiles_db.get_session(token)
+        if session:
             return True
-        del AUTH_SESSIONS[token]
     return False
 
 
@@ -123,9 +112,9 @@ async def require_auth(request: Request):
 def get_profile_id(request: Request) -> int | None:
     """Get the profile_id from the current session, or None."""
     token = request.cookies.get("ytp_session")
-    if token and token in AUTH_SESSIONS:
-        session = AUTH_SESSIONS[token]
-        if session["expiry"] > time.time():
+    if token:
+        session = profiles_db.get_session(token)
+        if session:
             return session.get("profile_id")
     return None
 
@@ -176,18 +165,9 @@ LOGIN_PAGE = """<!DOCTYPE html>
             border-radius: 12px;
             background-color: #121212;
             color: #f1f1f1;
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }
         input[type="password"]:focus { border-color: #3ea6ff; outline: none; }
-        .remember-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            color: #aaa;
-        }
-        input[type="checkbox"] { width: 18px; height: 18px; }
         button {
             width: 100%;
             padding: 14px;
@@ -207,10 +187,6 @@ LOGIN_PAGE = """<!DOCTYPE html>
         {{ERROR_PLACEHOLDER}}
         <input type="hidden" name="next" value="{{NEXT_URL}}">
         <input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">
-        <label class="remember-row">
-            <input type="checkbox" name="remember" value="1">
-            Remember this device (30 days)
-        </label>
         <button type="submit">Login</button>
     </form>
 </body>
@@ -285,7 +261,7 @@ async def login_page(request: Request, error: str = "", next: str = "/"):
 
 
 @router.post("/login")
-async def do_login(request: Request, response: Response, password: str = Form(...), remember: str = Form(default=""), next: str = Form(default="/")):
+async def do_login(request: Request, response: Response, password: str = Form(...), next: str = Form(default="/")):
     app_password = _get_password()
     if not app_password:
         return RedirectResponse(url="/", status_code=302)
@@ -300,14 +276,13 @@ async def do_login(request: Request, response: Response, password: str = Form(..
 
     if secrets.compare_digest(password, app_password):
         clear_failures(ip)
-        expiry = time.time() + (30 * 86400 if remember else 86400)
-        token, session = _create_session(expiry)
+        token, session = profiles_db.create_session()
 
         response = RedirectResponse(url=redirect_to, status_code=302)
         response.set_cookie(
             key="ytp_session",
             value=token,
-            max_age=30 * 86400 if remember else None,
+            max_age=_COOKIE_MAX_AGE,
             httponly=True,
             samesite="lax"
         )
@@ -322,15 +297,15 @@ async def do_login(request: Request, response: Response, password: str = Form(..
 @router.get("/logout")
 async def logout(request: Request):
     token = request.cookies.get("ytp_session")
-    if token and token in AUTH_SESSIONS:
-        del AUTH_SESSIONS[token]
+    if token:
+        profiles_db.delete_session(token)
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie("ytp_session")
     return response
 
 
 @router.get("/auth/status")
-async def auth_status():
+async def auth_status(auth: bool = Depends(require_auth)):
     now = time.time()
     blocked = {
         ip: {
@@ -339,4 +314,4 @@ async def auth_status():
         }
         for ip, info in AUTH_FAILURES.items()
     }
-    return {"blocked_ips": blocked, "active_sessions": len(AUTH_SESSIONS)}
+    return {"blocked_ips": blocked}

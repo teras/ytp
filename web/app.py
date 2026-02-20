@@ -1,5 +1,6 @@
 """YTP - YouTube Proxy. FastAPI entry point."""
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -11,21 +12,32 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-app = FastAPI(title="YTP")
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    # Shutdown: close httpx client
+    from helpers import http_client
+    await http_client.aclose()
+    logging.getLogger(__name__).info("httpx client closed")
+
+
+app = FastAPI(title="YTP", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-
-@app.middleware("http")
-async def cleanup_middleware(request, call_next):
-    from helpers import maybe_cleanup
-    maybe_cleanup()
-    return await call_next(request)
 
 # Init DB before helpers (helpers reads cookies_browser setting from DB)
 import profiles_db
 profiles_db.init_db()
 
 import helpers  # noqa: F401 — ensure cache dir + yt-dlp instance created on startup
+from helpers import maybe_cleanup
+
+
+@app.middleware("http")
+async def cleanup_middleware(request, call_next):
+    maybe_cleanup()
+    return await call_next(request)
 
 # Register routers
 from auth import router as auth_router

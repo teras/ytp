@@ -3,7 +3,9 @@ import logging
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 import yt_dlp
 
 log = logging.getLogger(__name__)
@@ -74,8 +76,69 @@ def maybe_cleanup():
             log.warning(f"Cleanup error: {e}")
 
 
+# ── Long-term cleanup registry (hourly) ──────────────────────────────────
+
+_long_cleanup_fns: list = []
+_last_long_cleanup: float = 0
+
+
+def register_long_cleanup(fn):
+    """Register a cleanup function to be called at most once per hour."""
+    _long_cleanup_fns.append(fn)
+
+
+def maybe_long_cleanup():
+    """Run all long-term cleanup functions if 1+ hour since last run."""
+    global _last_long_cleanup
+    now = time.time()
+    if now - _last_long_cleanup < 3600:
+        return
+    _last_long_cleanup = now
+    for fn in _long_cleanup_fns:
+        try:
+            fn()
+        except Exception as e:
+            log.warning(f"Long cleanup error: {e}")
+
+
+def make_cache_cleanup(cache: dict, ttl: float, label: str):
+    """Create a cleanup function that purges expired entries from a cache dict.
+
+    Expects cache values to have a 'created' key (epoch timestamp).
+    """
+    def _cleanup():
+        now = time.time()
+        expired = [k for k, v in cache.items()
+                   if now - v.get('created', 0) > ttl]
+        for k in expired:
+            del cache[k]
+        if expired:
+            log.info(f"Cleaned {len(expired)} expired {label} cache entries")
+    return _cleanup
+
+
+# ── Shared httpx async client ────────────────────────────────────────────────
+
+http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+
+
 def _yt_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
+
+
+# ── URL validation (SSRF protection) ────────────────────────────────────────
+
+_ALLOWED_DOMAINS = ('googlevideo.com', 'youtube.com', 'ytimg.com',
+                    'googleusercontent.com', 'ggpht.com')
+
+
+def is_youtube_url(url: str) -> bool:
+    """Check if a URL points to a known YouTube/Google video domain."""
+    try:
+        host = urlparse(url).hostname or ''
+        return any(host == d or host.endswith('.' + d) for d in _ALLOWED_DOMAINS)
+    except Exception:
+        return False
 
 
 # ── Video info cache ────────────────────────────────────────────────────────
@@ -84,16 +147,7 @@ _info_cache: dict = {}  # video_id -> {"info": dict, "created": float}
 _INFO_CACHE_TTL = 5 * 3600  # 5 hours (YouTube URLs expire ~6h)
 
 
-def _cleanup_info_cache():
-    now = time.time()
-    expired = [k for k, v in _info_cache.items() if now - v['created'] > _INFO_CACHE_TTL]
-    for k in expired:
-        del _info_cache[k]
-    if expired:
-        log.info(f"Cleaned {len(expired)} expired info cache entries")
-
-
-register_cleanup(_cleanup_info_cache)
+register_cleanup(make_cache_cleanup(_info_cache, _INFO_CACHE_TTL, "info"))
 
 
 _info_lock = threading.Lock()
@@ -103,7 +157,7 @@ def get_video_info(video_id: str) -> dict:
     """Get yt-dlp info dict for a video, with caching (5h TTL).
 
     Thread-safe: ydl_info.extract_info() is not safe to call concurrently,
-    so we serialize cache misses with a lock (double-checked pattern).
+    so we serialize with a global lock (double-checked pattern).
     """
     cached = _info_cache.get(video_id)
     if cached and time.time() - cached['created'] < _INFO_CACHE_TTL:

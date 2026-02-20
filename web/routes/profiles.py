@@ -2,7 +2,8 @@
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from pydantic import BaseModel
 
-from auth import require_auth, require_profile, get_profile_id, get_session, AUTH_SESSIONS
+from auth import require_auth, require_profile, get_profile_id, get_session
+from helpers import maybe_long_cleanup
 import profiles_db as db
 
 router = APIRouter(prefix="/api/profiles")
@@ -62,6 +63,7 @@ def _require_admin(request: Request):
 
 @router.get("")
 async def list_profiles(auth: bool = Depends(require_auth)):
+    maybe_long_cleanup()
     return db.list_profiles()
 
 
@@ -93,9 +95,7 @@ async def delete_profile(profile_id: int, request: Request, auth: bool = Depends
         raise HTTPException(status_code=404, detail="Profile not found")
     db.delete_profile(profile_id)
     # Clear profile_id from any session that had this profile selected
-    for session in AUTH_SESSIONS.values():
-        if session.get("profile_id") == profile_id:
-            session["profile_id"] = None
+    db.clear_profile_from_sessions(profile_id)
     return {"ok": True}
 
 
@@ -111,10 +111,9 @@ async def select_profile(profile_id: int, req: SelectProfileReq,
             raise HTTPException(status_code=403, detail="Invalid PIN")
     # Store in session
     token, session = get_session(request)
-    session["profile_id"] = profile_id
-    AUTH_SESSIONS[token] = session
+    db.set_session_profile(token, profile_id)
     # Set cookie on the injected response so FastAPI includes it
-    response.set_cookie(key="ytp_session", value=token, httponly=True, samesite="lax")
+    response.set_cookie(key="ytp_session", value=token, max_age=10 * 365 * 86400, httponly=True, samesite="lax")
     return {"ok": True, "profile": profile}
 
 
@@ -133,8 +132,8 @@ async def current_profile(request: Request, auth: bool = Depends(require_auth)):
 @router.post("/deselect")
 async def deselect_profile(request: Request, auth: bool = Depends(require_auth)):
     token = request.cookies.get("ytp_session")
-    if token and token in AUTH_SESSIONS:
-        AUTH_SESSIONS[token]["profile_id"] = None
+    if token:
+        db.set_session_profile(token, None)
     return {"ok": True}
 
 
@@ -148,6 +147,18 @@ async def update_preferences(req: UpdatePrefsReq, profile_id: int = Depends(requ
 async def get_history(limit: int = 50, offset: int = 0,
                       profile_id: int = Depends(require_profile)):
     return db.get_watch_history(profile_id, limit, offset)
+
+
+@router.delete("/history")
+async def clear_history(profile_id: int = Depends(require_profile)):
+    db.clear_watch_history(profile_id)
+    return {"ok": True}
+
+
+@router.delete("/history/{video_id}")
+async def delete_history_entry(video_id: str, profile_id: int = Depends(require_profile)):
+    db.delete_history_entry(profile_id, video_id)
+    return {"ok": True}
 
 
 @router.post("/position")

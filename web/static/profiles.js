@@ -5,6 +5,7 @@ let currentProfile = null;
 const AVATAR_COLORS = ['#cc0000', '#e67e22', '#27ae60', '#2980b9', '#8e44ad', '#e84393'];
 const DEFAULT_EMOJI = '\ud83d\ude0a';
 const isTouchDevice = () => 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+const _graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // Emoji palette for the desktop picker — grouped by category
 const EMOJI_PALETTE = {
@@ -293,14 +294,14 @@ function showSetupPassword(profile) {
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const pw = pwInput.value;
-        const confirm = confirmInput.value;
+        const confirmValue = confirmInput.value;
 
         if (pw.length < 1) {
             errorEl.textContent = 'Password is required';
             errorEl.classList.remove('hidden');
             return;
         }
-        if (pw !== confirm) {
+        if (pw !== confirmValue) {
             errorEl.textContent = 'Passwords do not match';
             errorEl.classList.remove('hidden');
             confirmInput.value = '';
@@ -350,7 +351,9 @@ function showCreateProfileForm() {
     `;
     profileOverlay.querySelector('.profile-selector').appendChild(modal);
     attachCreateFormListeners('create-profile-form');
-    modal.querySelector('.pin-cancel').addEventListener('click', async () => {
+    modal.querySelector('.pin-cancel').addEventListener('click', () => {
+        const form = document.getElementById('create-profile-form');
+        if (form && form._cleanupEmojiListener) form._cleanupEmojiListener();
         modal.remove();
     });
 }
@@ -405,7 +408,7 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
     // Mobile: capture input from native keyboard
     if (emojiInput) {
         emojiInput.addEventListener('input', () => {
-            const segments = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(emojiInput.value)];
+            const segments = [..._graphemeSegmenter.segment(emojiInput.value)];
             if (segments.length > 0) {
                 selectEmoji(segments[0].segment);
                 emojiInput.blur();
@@ -413,17 +416,14 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
         });
     }
 
-    // Close popup on outside click (use named handler so it can be removed with the form)
+    // Close popup on outside click.
+    // NOTE: this document-level listener is cleaned up via form._cleanupEmojiListener,
+    // called on both submit and cancel. If the overlay innerHTML is replaced directly
+    // (e.g. by showProfileSelector), orphaned listeners are harmless no-ops since
+    // they only toggle .hidden on the now-detached emojiPopup element.
     const closePopup = () => { if (emojiPopup) emojiPopup.classList.add('hidden'); };
     document.addEventListener('click', closePopup);
-    // Clean up listener when form is removed from DOM
-    const observer = new MutationObserver(() => {
-        if (!document.contains(form)) {
-            document.removeEventListener('click', closePopup);
-            observer.disconnect();
-        }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    form._cleanupEmojiListener = () => document.removeEventListener('click', closePopup);
 
     // Color picker selection
     form.querySelectorAll('.color-option').forEach(opt => {
@@ -442,6 +442,8 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
         const emoji = form.querySelector('input[name="avatar_emoji"]').value;
         const pin = document.getElementById('new-profile-pin').value || null;
         if (pin && pin.length !== 4) return;
+
+        if (form._cleanupEmojiListener) form._cleanupEmojiListener();
 
         try {
             const resp = await fetch('/api/profiles', {
@@ -517,9 +519,7 @@ if (profileSwitcherBtn) {
     });
 }
 
-document.addEventListener('click', () => {
-    profileMenu.classList.add('hidden');
-});
+// Menu closing handled by consolidated listener in app.js
 
 function navigateToHistory() {
     cacheListView();

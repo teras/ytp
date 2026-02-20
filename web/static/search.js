@@ -207,16 +207,7 @@ function appendVideos(videos) {
     fragment.innerHTML = videos.map(createVideoCard).join('');
     const newCards = [...fragment.children];
     newCards.forEach(card => videoGrid.appendChild(card));
-    // Only attach listeners to the newly added cards (not the entire grid)
-    newCards.forEach(card => {
-        card.dataset.attached = 'true';
-        card.addEventListener('click', () => navigateToVideo(
-            card.dataset.id,
-            card.dataset.title,
-            card.dataset.channel,
-            parseInt(card.dataset.duration) || 0
-        ));
-    });
+    attachCardListeners(videoGrid);
 }
 
 

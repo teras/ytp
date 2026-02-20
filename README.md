@@ -24,12 +24,15 @@ Data is persisted in `./data/` (SQLite database with profiles, history, favorite
 
 ## Features
 
-- Search YouTube videos
-- Stream videos directly in browser (DASH, up to 4K)
-- Netflix-style profiles with preferences, watch history, and favorites
-- Password-protected access
-- Optional per-profile PIN lock
-- Mobile-friendly interface
+- Search YouTube videos with infinite scroll
+- Channel browsing and related videos
+- Adaptive streaming (DASH up to 4K, HLS fallback for multi-audio)
+- Subtitle support (manual and auto-captions)
+- Multi-audio language switching
+- Netflix-style profiles with watch history, favorites, and per-profile preferences
+- Password-protected access with optional per-profile PIN lock
+- Browser cookie support for age-restricted content (local mode only, not available in Docker)
+- Mobile-friendly responsive interface
 
 ## License
 

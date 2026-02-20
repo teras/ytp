@@ -2,7 +2,7 @@
 import logging
 import struct
 
-import httpx
+from helpers import http_client
 
 log = logging.getLogger(__name__)
 
@@ -145,8 +145,6 @@ def parse_webm_ranges(data: bytes) -> dict:
 
 # ── Unified async prober ────────────────────────────────────────────────────
 
-_probe_client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
-
 
 async def probe_ranges(url: str) -> dict | None:
     """Probe a URL to find init/index ranges. Auto-detects MP4 vs WebM.
@@ -158,7 +156,7 @@ async def probe_ranges(url: str) -> dict | None:
     """
     try:
         # First fetch: 4KB — enough for MP4, enough to detect WebM
-        resp = await _probe_client.get(url, headers={'Range': 'bytes=0-4095'})
+        resp = await http_client.get(url, headers={'Range': 'bytes=0-4095'})
         if resp.status_code not in (200, 206):
             return None
 
@@ -174,10 +172,16 @@ async def probe_ranges(url: str) -> dict | None:
             result = parse_mp4_ranges(data)
             return result if result.get('init_end') else None
 
-        # WebM: need more data for Cues — start at 2MB (4KB already fetched is too small)
+        # WebM: try the 4KB we already have first (rarely enough, but free check)
+        result = parse_webm_ranges(data)
+        if result.get('index_start'):
+            log.info(f"WebM probed OK from initial 4KB")
+            return result
+
+        # Need more data for Cues — fetch 2MB, then 10MB if needed
         result = None
         for fetch_size in [2 * 1024 * 1024, 10 * 1024 * 1024]:
-            resp = await _probe_client.get(
+            resp = await http_client.get(
                 url, headers={'Range': f'bytes=0-{fetch_size - 1}'}
             )
             if resp.status_code not in (200, 206):

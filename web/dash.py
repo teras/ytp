@@ -5,13 +5,12 @@ import time
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from fastapi.responses import StreamingResponse
 
 from auth import require_auth
 from container import probe_ranges
-from helpers import register_cleanup, get_video_info
+from helpers import register_cleanup, make_cache_cleanup, get_video_info, http_client, is_youtube_url
 
 log = logging.getLogger(__name__)
 
@@ -22,16 +21,7 @@ _dash_cache: dict = {}
 _DASH_CACHE_TTL = 5 * 3600  # URLs expire after ~6h, refresh at 5h
 
 
-def _cleanup_dash_cache():
-    now = time.time()
-    expired = [k for k, v in _dash_cache.items() if now - v['created'] > _DASH_CACHE_TTL]
-    for k in expired:
-        del _dash_cache[k]
-    if expired:
-        log.info(f"Cleaned {len(expired)} expired DASH cache entries")
-
-
-register_cleanup(_cleanup_dash_cache)
+register_cleanup(make_cache_cleanup(_dash_cache, _DASH_CACHE_TTL, "DASH"))
 
 # Allowed extensions
 _VIDEO_EXTS = {'mp4', 'webm'}
@@ -39,8 +29,6 @@ _AUDIO_EXTS = {'m4a', 'mp4', 'webm'}
 
 
 # ── Proxy helper (shared with stream-live) ───────────────────────────────────
-
-_proxy_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
 
 
 async def proxy_range_request(request: Request, video_url: str, filesize: int = None):
@@ -54,8 +42,8 @@ async def proxy_range_request(request: Request, video_url: str, filesize: int = 
         upstream_headers['Range'] = 'bytes=0-'
 
     try:
-        upstream = await _proxy_client.send(
-            _proxy_client.build_request('GET', video_url, headers=upstream_headers),
+        upstream = await http_client.send(
+            http_client.build_request('GET', video_url, headers=upstream_headers),
             stream=True,
         )
     except Exception as e:
@@ -341,4 +329,6 @@ async def videoplayback_proxy(url: str, request: Request):
     No auth required — the manifest endpoint already checks auth,
     and the YouTube URLs are opaque/temporary.
     """
+    if not is_youtube_url(url):
+        raise HTTPException(status_code=403, detail="URL not allowed")
     return await proxy_range_request(request, url)

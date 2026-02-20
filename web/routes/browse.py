@@ -1,6 +1,5 @@
 """Browse routes: search, channel, related videos, cursor pagination."""
-import asyncio
-import json as json_module
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
@@ -13,17 +12,21 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
+_COOKIE_MAX_AGE = 10 * 365 * 86400  # 10 years
 
-def _set_session_cookie(response: Response, token: str, request: Request):
-    """Set session cookie if not already present."""
+
+def _json_with_cookie(data: dict, token: str, request: Request) -> Response:
+    """Return a JSON response, setting session cookie if needed."""
+    resp = Response(content=json.dumps(data), media_type='application/json')
     if request.cookies.get("ytp_session") != token:
-        response.set_cookie(
+        resp.set_cookie(
             key="ytp_session",
             value=token,
-            max_age=24 * 3600,
+            max_age=_COOKIE_MAX_AGE,
             httponly=True,
             samesite="lax"
         )
+    return resp
 
 
 @router.get("/search")
@@ -32,16 +35,11 @@ async def search(request: Request, q: str = Query(..., min_length=1), auth: bool
     token, session = get_session(request)
 
     try:
-        results, cursor = await asyncio.to_thread(create_search, session, q)
+        results, cursor = await create_search(token, q)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    resp = Response(
-        content=json_module.dumps({'results': results, 'cursor': cursor}),
-        media_type='application/json'
-    )
-    _set_session_cookie(resp, token, request)
-    return resp
+    return _json_with_cookie({'results': results, 'cursor': cursor}, token, request)
 
 
 @router.get("/more")
@@ -50,16 +48,11 @@ async def more(request: Request, cursor: str = Query(..., min_length=1), auth: b
     token, session = get_session(request)
 
     try:
-        results, next_cursor = await asyncio.to_thread(fetch_more, session, cursor)
+        results, next_cursor = await fetch_more(token, cursor)
     except Exception:
         results, next_cursor = [], None
 
-    resp = Response(
-        content=json_module.dumps({'results': results, 'cursor': next_cursor}),
-        media_type='application/json'
-    )
-    _set_session_cookie(resp, token, request)
-    return resp
+    return _json_with_cookie({'results': results, 'cursor': next_cursor}, token, request)
 
 
 @router.get("/related/{video_id}")
@@ -79,19 +72,14 @@ async def get_channel_videos(
     token, session = get_session(request)
 
     try:
-        channel_name, results, cursor = await asyncio.to_thread(create_channel, session, channel_id)
+        channel_name, results, cursor = await create_channel(token, channel_id)
     except Exception as e:
         log.error(f"Channel videos error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    resp = Response(
-        content=json_module.dumps({
-            'channel': channel_name,
-            'channel_id': channel_id,
-            'results': results,
-            'cursor': cursor
-        }),
-        media_type='application/json'
-    )
-    _set_session_cookie(resp, token, request)
-    return resp
+    return _json_with_cookie({
+        'channel': channel_name,
+        'channel_id': channel_id,
+        'results': results,
+        'cursor': cursor
+    }, token, request)

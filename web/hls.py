@@ -11,12 +11,11 @@ import re
 import time
 from urllib.parse import quote, urljoin
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import Response, StreamingResponse
 
 from auth import require_auth
-from helpers import register_cleanup, get_video_info
+from helpers import register_cleanup, make_cache_cleanup, get_video_info, http_client, is_youtube_url
 
 log = logging.getLogger(__name__)
 
@@ -27,18 +26,8 @@ _hls_cache: dict = {}
 _HLS_CACHE_TTL = 5 * 3600  # URLs expire after ~6h, refresh at 5h
 
 
-def _cleanup_hls_cache():
-    now = time.time()
-    expired = [k for k, v in _hls_cache.items() if now - v['created'] > _HLS_CACHE_TTL]
-    for k in expired:
-        del _hls_cache[k]
-    if expired:
-        log.info(f"Cleaned {len(expired)} expired HLS cache entries")
+register_cleanup(make_cache_cleanup(_hls_cache, _HLS_CACHE_TTL, "HLS"))
 
-
-register_cleanup(_cleanup_hls_cache)
-
-_hls_client = httpx.AsyncClient(timeout=30, follow_redirects=True)
 
 _RE_AUDIO_ID = re.compile(r'YT-EXT-AUDIO-CONTENT-ID="([^"]+)"')
 _RE_URI = re.compile(r'URI="([^"]+)"')
@@ -185,7 +174,7 @@ async def get_hls_master(
         if not manifest_url:
             raise HTTPException(status_code=404, detail="No HLS manifest available")
 
-        resp = await _hls_client.get(manifest_url)
+        resp = await http_client.get(manifest_url)
         if resp.status_code != 200:
             raise HTTPException(status_code=502, detail=f"Failed to fetch HLS manifest: {resp.status_code}")
 
@@ -218,9 +207,11 @@ async def get_audio_tracks(video_id: str, auth: bool = Depends(require_auth)):
 
 
 @router.get("/playlist")
-async def get_hls_playlist(url: str, request: Request):
+async def get_hls_playlist(url: str):
     """Fetch an HLS media playlist and rewrite segment URIs to proxy."""
-    resp = await _hls_client.get(url)
+    if not is_youtube_url(url):
+        raise HTTPException(status_code=403, detail="URL not allowed")
+    resp = await http_client.get(url)
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Failed to fetch playlist: {resp.status_code}")
 
@@ -232,14 +223,16 @@ async def get_hls_playlist(url: str, request: Request):
 @router.get("/segment")
 async def get_hls_segment(url: str, request: Request):
     """Stream an HLS segment from YouTube CDN (passthrough)."""
+    if not is_youtube_url(url):
+        raise HTTPException(status_code=403, detail="URL not allowed")
     try:
         upstream_headers = {}
         range_header = request.headers.get('range')
         if range_header:
             upstream_headers['Range'] = range_header
 
-        upstream = await _hls_client.send(
-            _hls_client.build_request('GET', url, headers=upstream_headers),
+        upstream = await http_client.send(
+            http_client.build_request('GET', url, headers=upstream_headers),
             stream=True,
         )
     except Exception as e:
