@@ -9,14 +9,37 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request, Response, Depends, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
+from helpers import register_cleanup
+
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
 # State
 AUTH_PASSWORD = os.environ.get('YTP_PASSWORD')
-AUTH_SESSIONS: dict = {}   # token -> expiry_time
+AUTH_SESSIONS: dict = {}   # token -> {"expiry": float, "searches": {}}
 AUTH_FAILURES: dict = {}   # ip -> {"count": int, "blocked_until": float}
+
+# Session TTL for anonymous (no-auth) sessions
+_ANON_SESSION_TTL = 24 * 3600  # 24h
+
+
+def _cleanup_sessions():
+    now = time.time()
+    expired = [t for t, s in AUTH_SESSIONS.items() if now > s['expiry']]
+    for t in expired:
+        del AUTH_SESSIONS[t]
+    # Clean old failure entries (>24h and not currently blocked)
+    old_failures = [ip for ip, info in AUTH_FAILURES.items()
+                    if info.get('blocked_until', 0) < now and
+                    now - info.get('last_failure', 0) > 86400]
+    for ip in old_failures:
+        del AUTH_FAILURES[ip]
+    if expired or old_failures:
+        log.info(f"Cleaned {len(expired)} expired sessions, {len(old_failures)} old failure entries")
+
+
+register_cleanup(_cleanup_sessions)
 
 
 def get_client_ip(request: Request) -> str:
@@ -39,6 +62,7 @@ def record_failure(ip: str):
     if ip not in AUTH_FAILURES:
         AUTH_FAILURES[ip] = {"count": 0, "blocked_until": 0}
     AUTH_FAILURES[ip]["count"] += 1
+    AUTH_FAILURES[ip]["last_failure"] = time.time()
     count = AUTH_FAILURES[ip]["count"]
     if count >= 10:
         AUTH_FAILURES[ip]["blocked_until"] = time.time() + 86400
@@ -52,12 +76,37 @@ def clear_failures(ip: str):
     AUTH_FAILURES.pop(ip, None)
 
 
+def _create_session(expiry: float) -> tuple[str, dict]:
+    """Create a new session and return (token, session_dict)."""
+    token = secrets.token_urlsafe(32)
+    session = {"expiry": expiry, "searches": {}}
+    AUTH_SESSIONS[token] = session
+    return token, session
+
+
+def get_session(request: Request, response: Response = None) -> tuple[str, dict]:
+    """Get or create a session. Returns (token, session_dict).
+
+    If response is provided and a new session is created, sets the cookie.
+    """
+    token = request.cookies.get("ytp_session")
+    if token and token in AUTH_SESSIONS:
+        session = AUTH_SESSIONS[token]
+        if session['expiry'] > time.time():
+            return token, session
+        del AUTH_SESSIONS[token]
+
+    # Create anonymous session
+    token, session = _create_session(time.time() + _ANON_SESSION_TTL)
+    return token, session
+
+
 def verify_session(request: Request) -> bool:
     if not AUTH_PASSWORD:
         return True
     token = request.cookies.get("ytp_session")
     if token and token in AUTH_SESSIONS:
-        if AUTH_SESSIONS[token] > time.time():
+        if AUTH_SESSIONS[token]['expiry'] > time.time():
             return True
         del AUTH_SESSIONS[token]
     return False
@@ -222,9 +271,8 @@ async def do_login(request: Request, response: Response, password: str = Form(..
 
     if password == AUTH_PASSWORD:
         clear_failures(ip)
-        token = secrets.token_urlsafe(32)
         expiry = time.time() + (30 * 86400 if remember else 86400)
-        AUTH_SESSIONS[token] = expiry
+        token, session = _create_session(expiry)
 
         response = RedirectResponse(url=redirect_to, status_code=302)
         response.set_cookie(

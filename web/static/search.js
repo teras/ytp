@@ -2,21 +2,15 @@
 
 let currentQuery = '';
 let currentChannelId = null;
-let currentCount = 10;
-const BATCH_SIZE = 10;
+let currentCursor = null;
 let isLoadingMore = false;
 let hasMoreResults = true;
-let loadedVideoIds = new Set();
 let listViewCache = null;
 let listViewMode = 'search'; // 'search' or 'channel'
 
 const loadMoreObserver = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting && !isLoadingMore && hasMoreResults) {
-        if (listViewMode === 'search' && currentQuery) {
-            loadMoreSearch();
-        } else if (listViewMode === 'channel' && currentChannelId) {
-            loadMoreChannel();
-        }
+        loadMore();
     }
 }, { threshold: 0.1 });
 
@@ -29,9 +23,8 @@ async function searchVideos(query) {
     listViewMode = 'search';
     currentQuery = query;
     currentChannelId = null;
-    currentCount = BATCH_SIZE;
+    currentCursor = null;
     hasMoreResults = true;
-    loadedVideoIds.clear();
 
     if (window.location.pathname !== '/') {
         history.pushState({ view: 'search' }, '', '/');
@@ -43,22 +36,8 @@ async function searchVideos(query) {
     noResults.classList.add('hidden');
     showLoadingCard(true);
 
-    await fetchSearchVideos(true);
-    loadMoreObserver.observe(loadMoreContainer);
-}
-
-async function loadMoreSearch() {
-    if (isLoadingMore || !hasMoreResults) return;
-    isLoadingMore = true;
-    currentCount += BATCH_SIZE;
-    showLoadingCard(true);
-    await fetchSearchVideos(false);
-    isLoadingMore = false;
-}
-
-async function fetchSearchVideos(isNewSearch) {
     try {
-        const response = await fetch(`/api/search?q=${encodeURIComponent(currentQuery)}&count=${currentCount}`);
+        const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
         const data = await response.json();
 
         if (!response.ok) {
@@ -72,17 +51,9 @@ async function fetchSearchVideos(isNewSearch) {
             noResults.classList.remove('hidden');
             hasMoreResults = false;
         } else {
-            const newVideos = data.results.filter(v => !loadedVideoIds.has(v.id));
-
-            if (isNewSearch) {
-                renderVideos(data.results);
-                data.results.forEach(v => loadedVideoIds.add(v.id));
-            } else {
-                appendVideos(newVideos);
-                newVideos.forEach(v => loadedVideoIds.add(v.id));
-            }
-
-            hasMoreResults = newVideos.length > 0;
+            renderVideos(data.results);
+            currentCursor = data.cursor;
+            hasMoreResults = !!data.cursor;
             loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
         }
     } catch (error) {
@@ -90,6 +61,8 @@ async function fetchSearchVideos(isNewSearch) {
         videoGrid.innerHTML = `<p class="error">Error: ${error.message}</p>`;
         hasMoreResults = false;
     }
+
+    loadMoreObserver.observe(loadMoreContainer);
 }
 
 
@@ -99,9 +72,8 @@ async function loadChannelVideos(channelId, channelName) {
     listViewMode = 'channel';
     currentChannelId = channelId;
     currentQuery = '';
-    currentCount = BATCH_SIZE;
+    currentCursor = null;
     hasMoreResults = true;
-    loadedVideoIds.clear();
 
     showListView();
     listHeader.classList.remove('hidden');
@@ -110,26 +82,13 @@ async function loadChannelVideos(channelId, channelName) {
     noResults.classList.add('hidden');
     showLoadingCard(true);
 
-    await fetchChannelVideos(true);
-    loadMoreObserver.observe(loadMoreContainer);
-}
-
-async function loadMoreChannel() {
-    if (isLoadingMore || !hasMoreResults) return;
-    isLoadingMore = true;
-    currentCount += BATCH_SIZE;
-    showLoadingCard(true);
-    await fetchChannelVideos(false);
-    isLoadingMore = false;
-}
-
-async function fetchChannelVideos(isNewLoad) {
     try {
-        const response = await fetch(`/api/channel/${currentChannelId}?count=${currentCount}`);
+        const response = await fetch(`/api/channel/${channelId}`);
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.detail || 'Failed to load channel');
+            const msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+            throw new Error(msg || 'Failed to load channel');
         }
 
         showLoadingCard(false);
@@ -142,17 +101,9 @@ async function fetchChannelVideos(isNewLoad) {
             noResults.classList.remove('hidden');
             hasMoreResults = false;
         } else {
-            const newVideos = data.results.filter(v => !loadedVideoIds.has(v.id));
-
-            if (isNewLoad) {
-                renderVideos(data.results);
-                data.results.forEach(v => loadedVideoIds.add(v.id));
-            } else {
-                appendVideos(newVideos);
-                newVideos.forEach(v => loadedVideoIds.add(v.id));
-            }
-
-            hasMoreResults = newVideos.length > 0;
+            renderVideos(data.results);
+            currentCursor = data.cursor;
+            hasMoreResults = !!data.cursor;
             loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
         }
     } catch (error) {
@@ -160,6 +111,40 @@ async function fetchChannelVideos(isNewLoad) {
         videoGrid.innerHTML = `<p class="error">Error: ${error.message}</p>`;
         hasMoreResults = false;
     }
+
+    loadMoreObserver.observe(loadMoreContainer);
+}
+
+
+// ── Load More (shared) ──────────────────────────────────────────────────────
+
+async function loadMore() {
+    if (isLoadingMore || !hasMoreResults || !currentCursor) return;
+    isLoadingMore = true;
+    showLoadingCard(true);
+
+    try {
+        const response = await fetch(`/api/more?cursor=${encodeURIComponent(currentCursor)}`);
+        const data = await response.json();
+
+        showLoadingCard(false);
+
+        if (!response.ok) {
+            throw new Error('Load more failed');
+        }
+
+        appendVideos(data.results);
+        currentCursor = data.cursor;
+        hasMoreResults = !!data.cursor && data.results.length > 0;
+        loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
+    } catch (error) {
+        showLoadingCard(false);
+        console.error('Load more error:', error);
+        hasMoreResults = false;
+        loadMoreContainer.classList.add('hidden');
+    }
+
+    isLoadingMore = false;
 }
 
 
@@ -281,8 +266,8 @@ function cacheListView() {
         mode: listViewMode,
         query: currentQuery,
         channelId: currentChannelId,
+        cursor: currentCursor,
         html: videoGrid.innerHTML,
-        loadedIds: new Set(loadedVideoIds),
         headerVisible: !listHeader.classList.contains('hidden'),
         headerTitle: listTitle.textContent
     };
@@ -293,9 +278,10 @@ function restoreListCache() {
         listViewMode = listViewCache.mode;
         currentQuery = listViewCache.query;
         currentChannelId = listViewCache.channelId;
+        currentCursor = listViewCache.cursor;
+        hasMoreResults = !!listViewCache.cursor;
         searchInput.value = currentQuery || '';
         videoGrid.innerHTML = listViewCache.html;
-        loadedVideoIds = listViewCache.loadedIds;
 
         if (listViewCache.headerVisible) {
             listHeader.classList.remove('hidden');
@@ -305,5 +291,10 @@ function restoreListCache() {
         }
 
         attachCardListeners(videoGrid);
+
+        if (hasMoreResults) {
+            loadMoreContainer.classList.remove('hidden');
+            loadMoreObserver.observe(loadMoreContainer);
+        }
     }
 }

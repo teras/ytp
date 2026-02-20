@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from auth import require_auth
 from container import probe_ranges
-from helpers import _yt_url, ydl_info
+from helpers import _yt_url, ydl_info, register_cleanup
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +20,18 @@ router = APIRouter()
 # DASH manifest cache: video_id -> {"mpd": str, "created": float}
 _dash_cache: dict = {}
 _DASH_CACHE_TTL = 5 * 3600  # URLs expire after ~6h, refresh at 5h
+
+
+def _cleanup_dash_cache():
+    now = time.time()
+    expired = [k for k, v in _dash_cache.items() if now - v['created'] > _DASH_CACHE_TTL]
+    for k in expired:
+        del _dash_cache[k]
+    if expired:
+        log.info(f"Cleaned {len(expired)} expired DASH cache entries")
+
+
+register_cleanup(_cleanup_dash_cache)
 
 # Allowed extensions
 _VIDEO_EXTS = {'mp4', 'mp4a', 'webm'}

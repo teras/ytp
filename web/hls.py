@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import Response, StreamingResponse
 
 from auth import require_auth
-from helpers import ydl_info, _yt_url
+from helpers import ydl_info, _yt_url, register_cleanup
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,18 @@ router = APIRouter(prefix="/api/hls")
 # Raw (rewritten) manifest cache: video_id -> {"manifest": str, "created": float}
 _hls_cache: dict = {}
 _HLS_CACHE_TTL = 5 * 3600  # URLs expire after ~6h, refresh at 5h
+
+
+def _cleanup_hls_cache():
+    now = time.time()
+    expired = [k for k, v in _hls_cache.items() if now - v['created'] > _HLS_CACHE_TTL]
+    for k in expired:
+        del _hls_cache[k]
+    if expired:
+        log.info(f"Cleaned {len(expired)} expired HLS cache entries")
+
+
+register_cleanup(_cleanup_hls_cache)
 
 _RE_AUDIO_ID = re.compile(r'YT-EXT-AUDIO-CONTENT-ID="([^"]+)"')
 _RE_URI = re.compile(r'URI="([^"]+)"')

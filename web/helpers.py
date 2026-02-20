@@ -1,6 +1,7 @@
-"""Shared configuration, yt-dlp instances, and helper functions."""
+"""Shared configuration, yt-dlp instances, helper functions, and cleanup registry."""
 import logging
 import os
+import time
 from pathlib import Path
 
 import yt_dlp
@@ -21,9 +22,34 @@ YDL_OPTS = {
 if _cookies_browser:
     YDL_OPTS['cookiesfrombrowser'] = (_cookies_browser,)
 
-# yt-dlp instances (reused for speed)
-ydl_search = yt_dlp.YoutubeDL({**YDL_OPTS, 'extract_flat': True})
+# yt-dlp instance for video info extraction (formats, subtitles, DASH/HLS URLs)
+# Search/channel pagination now uses InnerTube directly (see directcalls.py)
 ydl_info = yt_dlp.YoutubeDL(YDL_OPTS)
+
+
+# ── Cleanup registry ─────────────────────────────────────────────────────────
+
+_cleanup_registry: list = []
+_last_cleanup: float = 0
+
+
+def register_cleanup(fn):
+    """Register a cleanup function to be called periodically."""
+    _cleanup_registry.append(fn)
+
+
+def maybe_cleanup():
+    """Run all registered cleanup functions if 5+ minutes since last run."""
+    global _last_cleanup
+    now = time.time()
+    if now - _last_cleanup < 300:
+        return
+    _last_cleanup = now
+    for fn in _cleanup_registry:
+        try:
+            fn()
+        except Exception as e:
+            log.warning(f"Cleanup error: {e}")
 
 
 def _yt_url(video_id: str) -> str:

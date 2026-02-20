@@ -35,7 +35,6 @@ const audioMenu = document.getElementById('audio-menu');
 
 // Related
 const relatedVideos = document.getElementById('related-videos');
-const relatedLoadMore = document.getElementById('related-load-more');
 
 // Subtitles
 const subtitleBtnContainer = document.getElementById('subtitle-btn-container');

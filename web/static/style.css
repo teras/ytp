@@ -464,8 +464,7 @@ h1 {
     to { transform: rotate(360deg); }
 }
 
-#load-more-container,
-#related-load-more {
+#load-more-container {
     height: 1px;
 }
 

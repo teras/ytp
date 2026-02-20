@@ -63,6 +63,82 @@ def get_player_type(driver):
     return driver.execute_script("return currentPlayerType || null")
 
 
+def test_search_cursor_pagination(driver):
+    """Search returns results with cursor, load more works via /api/more."""
+    print(f"\n=== Test: Search cursor pagination ===")
+
+    driver.get(f"{BASE}/")
+
+    # Search for something common
+    search_input = driver.find_element(By.ID, "search-input")
+    search_input.clear()
+    search_input.send_keys("lofi hip hop")
+    driver.find_element(By.ID, "search-btn").click()
+
+    # Wait for first batch of results
+    WebDriverWait(driver, 30).until(
+        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)")) >= 5
+    )
+    first_batch = driver.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)")
+    first_count = len(first_batch)
+    print(f"  [OK] First batch: {first_count} results")
+    assert first_count >= 5, f"Expected >= 5 results in first batch, got {first_count}"
+
+    # Scroll to bottom to trigger load more
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+    time.sleep(3)
+
+    # Check that more results loaded
+    WebDriverWait(driver, 30).until(
+        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)")) > first_count
+    )
+    total = len(driver.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)"))
+    print(f"  [OK] After scroll: {total} results (was {first_count})")
+    assert total > first_count, "Load more should have added results"
+
+    print("  === PASSED ===")
+
+
+def test_channel_cursor_pagination(driver):
+    """Channel browsing uses cursor pagination."""
+    print(f"\n=== Test: Channel cursor pagination ===")
+
+    # Navigate to a known channel video first, then click channel link
+    driver.get(f"{BASE}/watch?v={SINGLE_AUDIO_VIDEO}")
+
+    # Wait for video info
+    WebDriverWait(driver, 60).until(
+        lambda d: d.find_element(By.ID, "video-title").text not in ("", "Loading...")
+    )
+
+    # Click on channel name to go to channel page
+    channel_link = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.ID, "video-channel"))
+    )
+    channel_name = channel_link.text
+    channel_link.click()
+    print(f"  [OK] Clicked channel: {channel_name}")
+
+    # Wait for channel videos to load
+    WebDriverWait(driver, 30).until(
+        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)")) >= 5
+    )
+    first_count = len(driver.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)"))
+    print(f"  [OK] First batch: {first_count} channel videos")
+
+    # Scroll to load more
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+    time.sleep(3)
+
+    WebDriverWait(driver, 30).until(
+        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)")) > first_count
+    )
+    total = len(driver.find_elements(By.CSS_SELECTOR, ".video-card:not(.loading-card)"))
+    print(f"  [OK] After scroll: {total} channel videos (was {first_count})")
+
+    print("  === PASSED ===")
+
+
 def test_multi_audio_dash_first(driver):
     """Multi-audio video starts with DASH, shows audio button, can switch to HLS and back."""
     print(f"\n=== Test: Multi-audio DASH-first ({MULTI_AUDIO_VIDEO}) ===")
@@ -576,6 +652,8 @@ def main():
 
     try:
         login(driver)
+        test_search_cursor_pagination(driver)
+        test_channel_cursor_pagination(driver)
         test_multi_audio_dash_first(driver)
         test_audio_switch_to_hls(driver)
         test_audio_switch_back_to_dash(driver)

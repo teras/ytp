@@ -9,14 +9,30 @@ from fastapi.responses import FileResponse, Response
 
 from auth import require_auth
 from dash import proxy_range_request
-from helpers import CACHE_DIR, YDL_OPTS, ydl_info, _yt_url, format_number
+from helpers import CACHE_DIR, YDL_OPTS, ydl_info, _yt_url, format_number, register_cleanup
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
 # Cache subtitle URLs per video (populated by /api/info, consumed by /api/subtitle)
+# Each entry: {lang: {auto, url}, ..., "_created": float}
 _subtitle_cache: dict = {}
+_SUBTITLE_CACHE_TTL = 5 * 3600
+
+
+def _cleanup_subtitle_cache():
+    import time
+    now = time.time()
+    expired = [k for k, v in _subtitle_cache.items()
+               if now - v.get('_created', 0) > _SUBTITLE_CACHE_TTL]
+    for k in expired:
+        del _subtitle_cache[k]
+    if expired:
+        log.info(f"Cleaned {len(expired)} expired subtitle cache entries")
+
+
+register_cleanup(_cleanup_subtitle_cache)
 
 
 @router.get("/info/{video_id}")
@@ -62,6 +78,8 @@ async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
             cache_entry[lang] = {'auto': True, 'url': url}
             subtitle_tracks.append({'lang': lang, 'label': name, 'auto': True})
 
+        import time as _time
+        cache_entry['_created'] = _time.time()
         _subtitle_cache[video_id] = cache_entry
 
         # Detect multi-audio: count distinct languages among audio formats
