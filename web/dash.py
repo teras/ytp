@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from auth import require_auth
 from container import probe_ranges
-from helpers import register_cleanup, make_cache_cleanup, get_video_info, http_client, is_youtube_url
+from helpers import register_cleanup, make_cache_cleanup, get_video_info, http_client, is_youtube_url, VIDEO_ID_RE
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +126,8 @@ async def get_dash_manifest(video_id: str, auth: bool = Depends(require_auth)):
     Prefers webm/VP9 (available 360p-4K), falls back to mp4/avc1.
     """
 
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
     cached = _dash_cache.get(video_id)
     if cached and time.time() - cached['created'] < _DASH_CACHE_TTL:
         return Response(cached['mpd'], media_type='application/dash+xml',

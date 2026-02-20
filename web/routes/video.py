@@ -1,6 +1,7 @@
 """Video routes: info, subtitle, stream-live."""
 import asyncio
 import logging
+import re
 import time
 
 from fastapi import APIRouter, HTTPException, Request, Depends
@@ -8,13 +9,19 @@ from fastapi.responses import FileResponse, Response
 
 from auth import require_auth
 from dash import proxy_range_request
-from helpers import CACHE_DIR, format_number, register_cleanup, make_cache_cleanup, get_video_info as _cached_info, http_client
+from helpers import CACHE_DIR, VIDEO_ID_RE, format_number, register_cleanup, make_cache_cleanup, get_video_info as _cached_info, http_client
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
 _SKIP_LANGS = {'live_chat', 'rechat'}
+_LANG_RE = re.compile(r'^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{1,8})*$')
+
+
+def _check_video_id(video_id: str):
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
 
 
 # Cache subtitle URLs per video (populated by /api/info, consumed by /api/subtitle)
@@ -29,6 +36,7 @@ register_cleanup(make_cache_cleanup(_subtitle_cache, _SUBTITLE_CACHE_TTL, "subti
 @router.get("/info/{video_id}")
 async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
     """Get video info (views, likes, etc.)"""
+    _check_video_id(video_id)
     try:
         info = await asyncio.to_thread(_cached_info, video_id)
 
@@ -93,6 +101,9 @@ async def get_video_info(video_id: str, auth: bool = Depends(require_auth)):
 @router.get("/subtitle/{video_id}")
 async def get_subtitle(video_id: str, lang: str, auth: bool = Depends(require_auth)):
     """Proxy a subtitle VTT file (original language or manual subs only)."""
+    _check_video_id(video_id)
+    if not _LANG_RE.match(lang):
+        raise HTTPException(status_code=400, detail="Invalid language code")
     # Check local cache first
     def _find_local():
         matches = list(CACHE_DIR.glob(f"{video_id}.{lang}.vtt"))
@@ -123,6 +134,7 @@ async def get_subtitle(video_id: str, lang: str, auth: bool = Depends(require_au
 @router.get("/stream-live/{video_id}")
 async def stream_live(video_id: str, request: Request, auth: bool = Depends(require_auth)):
     """Fallback: proxy progressive format (22/18) with range requests."""
+    _check_video_id(video_id)
     try:
         info = await asyncio.to_thread(_cached_info, video_id)
 

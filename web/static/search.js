@@ -7,6 +7,7 @@ let isLoadingMore = false;
 let hasMoreResults = true;
 let listViewCache = null;
 let listViewMode = 'search'; // 'search' or 'channel'
+let _listGeneration = 0; // incremented on every new search/channel/list load to discard stale responses
 
 const loadMoreObserver = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting && !isLoadingMore && hasMoreResults) {
@@ -25,6 +26,7 @@ async function searchVideos(query) {
     currentChannelId = null;
     currentCursor = null;
     hasMoreResults = true;
+    const gen = ++_listGeneration;
 
     if (window.location.pathname !== '/') {
         history.pushState({ view: 'search' }, '', '/');
@@ -34,10 +36,13 @@ async function searchVideos(query) {
     listHeader.classList.add('hidden');
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
+    loadMoreContainer.classList.add('hidden');
+    loadMoreObserver.disconnect();
     showLoadingCard(true);
 
     try {
         const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        if (gen !== _listGeneration) return; // stale
         const data = await response.json();
 
         if (!response.ok) {
@@ -57,12 +62,13 @@ async function searchVideos(query) {
             loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
         }
     } catch (error) {
+        if (gen !== _listGeneration) return;
         showLoadingCard(false);
         videoGrid.innerHTML = `<p class="error">Error: ${escapeHtml(error.message)}</p>`;
         hasMoreResults = false;
     }
 
-    loadMoreObserver.observe(loadMoreContainer);
+    if (gen === _listGeneration) loadMoreObserver.observe(loadMoreContainer);
 }
 
 
@@ -74,16 +80,20 @@ async function loadChannelVideos(channelId, channelName) {
     currentQuery = '';
     currentCursor = null;
     hasMoreResults = true;
+    const gen = ++_listGeneration;
 
     showListView();
     listHeader.classList.remove('hidden');
     listTitle.textContent = channelName || 'Channel';
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
+    loadMoreContainer.classList.add('hidden');
+    loadMoreObserver.disconnect();
     showLoadingCard(true);
 
     try {
         const response = await fetch(`/api/channel/${channelId}`);
+        if (gen !== _listGeneration) return;
         const data = await response.json();
 
         if (!response.ok) {
@@ -107,12 +117,13 @@ async function loadChannelVideos(channelId, channelName) {
             loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
         }
     } catch (error) {
+        if (gen !== _listGeneration) return;
         showLoadingCard(false);
         videoGrid.innerHTML = `<p class="error">Error: ${escapeHtml(error.message)}</p>`;
         hasMoreResults = false;
     }
 
-    loadMoreObserver.observe(loadMoreContainer);
+    if (gen === _listGeneration) loadMoreObserver.observe(loadMoreContainer);
 }
 
 
@@ -121,10 +132,12 @@ async function loadChannelVideos(channelId, channelName) {
 async function loadMore() {
     if (isLoadingMore || !hasMoreResults || !currentCursor) return;
     isLoadingMore = true;
+    const gen = _listGeneration; // capture, don't increment
     showLoadingCard(true);
 
     try {
         const response = await fetch(`/api/more?cursor=${encodeURIComponent(currentCursor)}`);
+        if (gen !== _listGeneration) { isLoadingMore = false; return; } // stale
         const data = await response.json();
 
         showLoadingCard(false);
@@ -138,6 +151,7 @@ async function loadMore() {
         hasMoreResults = !!data.cursor && data.results.length > 0;
         loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
     } catch (error) {
+        if (gen !== _listGeneration) { isLoadingMore = false; return; }
         showLoadingCard(false);
         console.error('Load more error:', error);
         hasMoreResults = false;
@@ -172,14 +186,19 @@ function showLoadingCard(show) {
 }
 
 function createVideoCard(video) {
+    const meta = video.is_live ? '<span class="video-live">LIVE</span>'
+               : video.published ? `<span class="video-published">${escapeHtml(video.published)}</span>`
+               : '';
+    const durationBadge = video.is_live ? '<span class="duration live">LIVE</span>'
+                        : `<span class="duration">${video.duration_str}</span>`;
     return `<div class="video-card" data-id="${video.id}" data-title="${escapeAttr(video.title)}" data-channel="${escapeAttr(video.channel)}" data-duration="${video.duration}">
         <div class="thumbnail-container">
             <img src="${video.thumbnail}" alt="${escapeHtml(video.title)}" loading="lazy">
-            <span class="duration">${video.duration_str}</span>
+            ${durationBadge}
         </div>
         <div class="video-info">
             <h3 class="video-title">${escapeHtml(video.title)}</h3>
-            <p class="channel">${escapeHtml(video.channel)}</p>
+            <p class="channel">${escapeHtml(video.channel)}${meta ? ' · ' : ''}${meta}</p>
         </div>
     </div>`;
 }

@@ -113,12 +113,23 @@ def _parse_video_renderer(renderer: dict) -> dict | None:
         except ValueError:
             pass
 
+    # Published time: relative text like "2 days ago", "3 months ago"
+    published = renderer.get("publishedTimeText", {}).get("simpleText", "")
+
+    # Live badge: badges[] → metadataBadgeRenderer.label == "LIVE"
+    is_live = any(
+        b.get("metadataBadgeRenderer", {}).get("label") == "LIVE"
+        for b in renderer.get("badges", [])
+    )
+
     return {
         "id": video_id,
         "title": title,
         "duration": duration,
         "duration_str": duration_str or _format_duration(duration),
         "channel": channel or "Unknown",
+        "published": published,
+        "is_live": is_live,
         "thumbnail": f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
     }
 

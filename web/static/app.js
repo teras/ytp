@@ -248,9 +248,13 @@ window.addEventListener('popstate', (e) => {
     } else if (e.state?.view === 'favorites') {
         showListView();
         loadFavorites();
-    } else {
+    } else if (e.state?.view === 'search') {
         showListView();
         restoreListCache();
+    } else {
+        // Default (home) = watch history
+        showListView();
+        loadHistory();
     }
 });
 
@@ -277,16 +281,27 @@ function handleInitialRoute() {
         showListView();
         loadFavorites();
     } else {
-        history.replaceState({ view: 'search' }, '', '/');
+        // Home page = watch history
+        history.replaceState({ view: 'history' }, '', '/');
+        showListView();
+        loadHistory();
     }
 }
 
-async function loadListPage(endpoint, title, {showClear = false, removable = false} = {}) {
+async function loadListPage(endpoint, title, {showClear = false, removable = false, clearEndpoint = '', clearPrompt = ''} = {}) {
     listHeader.classList.remove('hidden');
     listTitle.textContent = title;
     clearListBtn.classList.toggle('hidden', !showClear);
+    clearListBtn.textContent = `Clear ${title.toLowerCase()}`;
+    _clearListEndpoint = clearEndpoint;
+    _clearListPrompt = clearPrompt;
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
+    loadMoreContainer.classList.add('hidden');
+    // Bump generation to discard any in-flight search/channel/loadMore responses
+    _listGeneration++;
+    loadMoreObserver.disconnect();
+    searchInput.value = '';
 
     try {
         const resp = await fetch(endpoint);
@@ -305,14 +320,15 @@ async function loadListPage(endpoint, title, {showClear = false, removable = fal
                 duration_str: item.duration_str || '',
             })));
             if (removable) {
+                const removeEndpoint = clearEndpoint; // e.g. /api/profiles/history or /api/profiles/favorites
                 videoGrid.querySelectorAll('.video-card').forEach(card => {
                     const btn = document.createElement('button');
                     btn.className = 'remove-entry-btn';
-                    btn.title = 'Remove from history';
+                    btn.title = 'Remove';
                     btn.textContent = '\u00d7';
                     btn.addEventListener('click', async (e) => {
                         e.stopPropagation();
-                        const resp = await fetch(`/api/profiles/history/${card.dataset.id}`, {method: 'DELETE'});
+                        const resp = await fetch(`${removeEndpoint}/${card.dataset.id}`, {method: 'DELETE'});
                         if (resp.ok) {
                             card.remove();
                             if (!videoGrid.querySelector('.video-card')) {
@@ -331,19 +347,22 @@ async function loadListPage(endpoint, title, {showClear = false, removable = fal
     }
 }
 
-function loadHistory() { return loadListPage('/api/profiles/history?limit=50', 'Watch History', {showClear: true, removable: true}); }
-function loadFavorites() { return loadListPage('/api/profiles/favorites?limit=50', 'Favorites'); }
+function loadHistory() { return loadListPage('/api/profiles/history?limit=50', 'Watch History', {showClear: true, removable: true, clearEndpoint: '/api/profiles/history', clearPrompt: 'Clear all watch history?'}); }
+function loadFavorites() { return loadListPage('/api/profiles/favorites?limit=50', 'Favorites', {showClear: true, removable: true, clearEndpoint: '/api/profiles/favorites', clearPrompt: 'Clear all favorites?'}); }
+
+let _clearListEndpoint = '';
+let _clearListPrompt = '';
 
 clearListBtn.addEventListener('click', async () => {
-    if (!confirm('Clear all watch history?')) return;
+    if (!_clearListEndpoint || !await nativeConfirm(_clearListPrompt)) return;
     try {
-        const resp = await fetch('/api/profiles/history', {method: 'DELETE'});
-        if (!resp.ok) throw new Error('Failed to clear history');
+        const resp = await fetch(_clearListEndpoint, {method: 'DELETE'});
+        if (!resp.ok) throw new Error('Failed to clear');
         videoGrid.innerHTML = '';
         noResults.classList.remove('hidden');
         clearListBtn.classList.add('hidden');
     } catch (err) {
-        alert(err.message);
+        nativeAlert(err.message);
     }
 });
 
@@ -601,6 +620,35 @@ function linkifyText(text) {
         return `<a href="${href}" target="_blank" rel="noopener">${match}</a>`;
     });
 }
+
+// ── Native Modals (replace browser alert/confirm) ──────────────────────────
+
+function showModal(message, {confirm: isConfirm = false} = {}) {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'pin-modal';
+        overlay.innerHTML = `
+            <div class="pin-modal-content" style="max-width:360px">
+                <p style="margin-bottom:20px;font-size:15px;line-height:1.5">${escapeHtml(message)}</p>
+                <div class="pin-actions">
+                    ${isConfirm ? '<button class="pin-cancel">Cancel</button>' : ''}
+                    <button class="pin-submit">OK</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        // Defensive: focus Cancel for confirm dialogs, OK for alerts
+        const cancelBtn = overlay.querySelector('.pin-cancel');
+        if (cancelBtn) cancelBtn.focus(); else overlay.querySelector('.pin-submit').focus();
+        overlay.querySelector('.pin-submit').addEventListener('click', () => { overlay.remove(); resolve(true); });
+        if (cancelBtn) cancelBtn.addEventListener('click', () => { overlay.remove(); resolve(false); });
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.remove(); resolve(isConfirm ? false : true); } });
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { overlay.remove(); resolve(isConfirm ? false : true); } });
+    });
+}
+
+function nativeAlert(message) { return showModal(message); }
+function nativeConfirm(message) { return showModal(message, {confirm: true}); }
 
 // ── Playback Position ───────────────────────────────────────────────────────
 

@@ -151,6 +151,14 @@ def create_profile(name: str, pin: str | None = None, avatar_color: str = "#cc00
     }
 
 
+def update_profile_avatar(profile_id: int, avatar_color: str, avatar_emoji: str):
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE profiles SET avatar_color = ?, avatar_emoji = ? WHERE id = ?",
+            (avatar_color, avatar_emoji, profile_id),
+        )
+
+
 def delete_profile(profile_id: int) -> bool:
     with _connect() as conn:
         cur = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
@@ -165,6 +173,14 @@ def verify_pin(profile_id: int, pin: str) -> bool:
     if r["pin"] is None:
         return True  # no PIN set
     return secrets.compare_digest(r["pin"], pin)
+
+
+def update_pin(profile_id: int, pin: str | None):
+    # PIN stored as plaintext: design choice — 4-digit PINs provide only casual
+    # profile separation (like Netflix), not real security.  Hashing wouldn't
+    # meaningfully improve security given the tiny keyspace (10k combinations).
+    with _connect() as conn:
+        conn.execute("UPDATE profiles SET pin = ? WHERE id = ?", (pin if pin else None, profile_id))
 
 
 def update_preferences(profile_id: int, quality: int | None = None, subtitle_lang: str | None = None):
@@ -222,6 +238,11 @@ def clear_watch_history(profile_id: int):
 def delete_history_entry(profile_id: int, video_id: str):
     with _connect() as conn:
         conn.execute("DELETE FROM watch_history WHERE profile_id = ? AND video_id = ?", (profile_id, video_id))
+
+
+def clear_favorites(profile_id: int):
+    with _connect() as conn:
+        conn.execute("DELETE FROM favorites WHERE profile_id = ?", (profile_id,))
 
 
 def add_favorite(profile_id: int, video_id: str, title: str = "",
@@ -295,6 +316,8 @@ def get_app_password() -> str | None:
 
 
 def set_app_password(password: str | None):
+    # Stored as plaintext: design choice for a self-hosted app where the DB
+    # is only accessible to the server operator (who can reset it anyway).
     set_setting("app_password", password if password else None)
 
 

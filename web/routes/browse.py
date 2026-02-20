@@ -1,10 +1,12 @@
 """Browse routes: search, channel, related videos, cursor pagination."""
 import json
 import logging
+import re
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
 
 from auth import require_auth, get_session
+from helpers import VIDEO_ID_RE
 from iterators import create_search, create_channel, fetch_more
 from directcalls import fetch_related
 
@@ -55,9 +57,14 @@ async def more(request: Request, cursor: str = Query(..., min_length=1), auth: b
     return _json_with_cookie({'results': results, 'cursor': next_cursor}, token, request)
 
 
+_CHANNEL_ID_RE = re.compile(r'^UC[a-zA-Z0-9_-]{22}$')
+
+
 @router.get("/related/{video_id}")
 async def get_related_videos(video_id: str, auth: bool = Depends(require_auth)):
     """Get related videos for a video."""
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
     results = await fetch_related(video_id)
     return {"results": results}
 
@@ -69,6 +76,8 @@ async def get_channel_videos(
     auth: bool = Depends(require_auth)
 ):
     """Get videos from a channel. Returns first batch + cursor for pagination."""
+    if not _CHANNEL_ID_RE.match(channel_id):
+        raise HTTPException(status_code=400, detail="Invalid channel ID")
     token, session = get_session(request)
 
     try:

@@ -2,7 +2,10 @@
 
 let currentProfile = null;
 
-const AVATAR_COLORS = ['#cc0000', '#e67e22', '#27ae60', '#2980b9', '#8e44ad', '#e84393'];
+const AVATAR_COLORS = [
+    '#cc0000', '#e67e22', '#f1c40f', '#27ae60', '#2980b9', '#8e44ad',
+    '#ffffff', '#b0b0b0', '#555555', '#222222', '#e84393', 'transparent',
+];
 const DEFAULT_EMOJI = '\ud83d\ude0a';
 const isTouchDevice = () => 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 const _graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -39,32 +42,31 @@ const profileSwitcherBtn = document.getElementById('profile-switcher-btn');
 
 async function checkProfile() {
     try {
-        const resp = await fetch('/api/profiles/current');
-        if (resp.ok) {
-            currentProfile = await resp.json();
+        const resp = await fetch('/api/profiles/boot');
+        if (!resp.ok) throw new Error('Boot failed');
+        const data = await resp.json();
+
+        if (data.state === 'login-required') {
+            window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+            return;
+        } else if (data.state === 'first-run') {
+            showCreateFirstProfile();
+        } else if (data.state === 'ready') {
+            currentProfile = data.profile;
             applyProfilePrefs();
             updateProfileButton();
+            profileOverlay.classList.add('hidden');
             handleInitialRoute();
-            return;
-        }
-    } catch {}
-
-    // No active profile — check what profiles exist
-    try {
-        const resp = await fetch('/api/profiles');
-        const profiles = await resp.json();
-
-        if (profiles.length === 0) {
-            showCreateFirstProfile();
-        } else if (profiles.length === 1 && !profiles[0].has_pin) {
-            // Auto-select the single profile without PIN
-            await selectProfile(profiles[0].id, null);
-        } else {
-            showProfileSelector(profiles);
+        } else if (data.state === 'profile-select') {
+            const profiles = data.profiles;
+            if (profiles.length === 1 && !profiles[0].has_pin) {
+                await selectProfile(profiles[0].id, null);
+            } else {
+                showProfileSelector(profiles);
+            }
         }
     } catch (err) {
-        console.error('Profile check failed:', err);
-        handleInitialRoute();
+        console.error('Boot check failed:', err);
     }
 }
 
@@ -82,7 +84,7 @@ function applyProfilePrefs() {
 function updateProfileButton() {
     if (!currentProfile || !profileSwitcherBtn) return;
     const display = currentProfile.avatar_emoji || currentProfile.name.charAt(0).toUpperCase();
-    profileSwitcherBtn.innerHTML = `<span class="profile-avatar-small" style="background:${currentProfile.avatar_color}">${display}</span> ${escapeHtml(currentProfile.name)}`;
+    profileSwitcherBtn.innerHTML = `<span class="profile-avatar-small" style="background:${currentProfile.avatar_color}">${display}</span>`;
     profileSwitcherBtn.classList.remove('hidden');
 }
 
@@ -104,7 +106,7 @@ function showProfileSelector(profiles) {
                         ${isAdmin && !p.is_admin ? `<button class="profile-delete-btn" data-id="${p.id}" title="Delete profile">x</button>` : ''}
                     </div>
                 `).join('')}
-                ${!currentProfile || currentProfile.is_admin || profiles.length === 0 ? `
+                ${isAdmin || profiles.length === 0 ? `
                     <div class="profile-card profile-add-card" id="profile-add-btn">
                         <div class="profile-avatar profile-avatar-add">+</div>
                         <div class="profile-name">Add</div>
@@ -121,7 +123,8 @@ function showProfileSelector(profiles) {
             if (e.target.closest('.profile-delete-btn')) return;
             const id = parseInt(card.dataset.id);
             const hasPin = card.dataset.hasPin === 'true';
-            if (hasPin) {
+            const isCurrentProfile = currentProfile && currentProfile.id === id;
+            if (hasPin && !isCurrentProfile) {
                 showPinPrompt(id);
             } else {
                 selectProfile(id, null);
@@ -135,8 +138,8 @@ function showProfileSelector(profiles) {
             e.stopPropagation();
             const id = parseInt(btn.dataset.id);
             const name = btn.closest('.profile-card').querySelector('.profile-name').textContent;
-            if (confirm(`Delete profile "${name}"?`)) {
-                await fetch(`/api/profiles/${id}`, { method: 'DELETE' });
+            if (await nativeConfirm(`Delete profile "${name}"?`)) {
+                await fetch(`/api/profiles/profile/${id}`, { method: 'DELETE' });
                 const resp = await fetch('/api/profiles');
                 const updated = await resp.json();
                 showProfileSelector(updated);
@@ -208,7 +211,11 @@ async function selectProfile(id, pin) {
         applyProfilePrefs();
         updateProfileButton();
         profileOverlay.classList.add('hidden');
-        handleInitialRoute();
+        // Always go to home (watch history) on profile select/switch
+        stopPlayer();
+        history.replaceState({ view: 'history' }, '', '/');
+        showListView();
+        loadHistory();
         return true;
     } catch {
         return false;
@@ -231,26 +238,28 @@ function buildEmojiPickerPopupHtml() {
     return html;
 }
 
-function buildAvatarPickerHtml() {
+function buildAvatarPickerHtml(currentColor = null, currentEmoji = null) {
+    const color = currentColor || AVATAR_COLORS[0];
+    const emoji = currentEmoji || DEFAULT_EMOJI;
     return `
         <div class="avatar-picker-wrap">
             <div class="avatar-preview-row">
-                <div class="avatar-preview" id="avatar-preview" style="background:${AVATAR_COLORS[0]}" title="Click to change emoji">
-                    ${DEFAULT_EMOJI}
+                <div class="avatar-preview" id="avatar-preview" style="background:${color}" title="Click to change emoji">
+                    ${emoji}
                 </div>
-                <input type="text" class="emoji-input" id="emoji-input" value="${DEFAULT_EMOJI}" autocomplete="off">
+                <input type="text" class="emoji-input" id="emoji-input" value="${emoji}" autocomplete="off">
             </div>
             ${buildEmojiPickerPopupHtml()}
         </div>
         <div class="color-picker">
-            ${AVATAR_COLORS.map((c, i) => `
-                <label class="color-option${i === 0 ? ' selected' : ''}">
-                    <input type="radio" name="avatar_color" value="${c}" ${i === 0 ? 'checked' : ''}>
+            ${AVATAR_COLORS.map(c => `
+                <label class="color-option${c === color ? ' selected' : ''}">
+                    <input type="radio" name="avatar_color" value="${c}" ${c === color ? 'checked' : ''}>
                     <span class="color-swatch" style="background:${c}"></span>
                 </label>
             `).join('')}
         </div>
-        <input type="hidden" name="avatar_emoji" value="${DEFAULT_EMOJI}">
+        <input type="hidden" name="avatar_emoji" value="${emoji}">
     `;
 }
 
@@ -260,7 +269,7 @@ function showCreateFirstProfile() {
             <h2>Welcome to YTP</h2>
             <p class="wizard-subtitle">Create your admin profile to get started</p>
             <form id="create-first-profile-form" class="profile-form">
-                <input type="text" id="new-profile-name" placeholder="Name" maxlength="20" required autofocus>
+                <input type="text" id="new-profile-name" placeholder="Name" maxlength="20" pattern="[a-zA-Z0-9_]+" title="Letters, numbers and underscores only" required autofocus>
                 ${buildAvatarPickerHtml()}
                 <input type="password" id="new-profile-pin" placeholder="4-digit PIN (optional)" maxlength="4" pattern="[0-9]*" inputmode="numeric">
                 <button type="submit">Next</button>
@@ -339,7 +348,7 @@ function showCreateProfileForm() {
         <div class="pin-modal-content" style="max-width:380px">
             <h3>New Profile</h3>
             <form id="create-profile-form" class="profile-form">
-                <input type="text" id="new-profile-name" placeholder="Name" maxlength="20" required autofocus>
+                <input type="text" id="new-profile-name" placeholder="Name" maxlength="20" pattern="[a-zA-Z0-9_]+" title="Letters, numbers and underscores only" required autofocus>
                 ${buildAvatarPickerHtml()}
                 <input type="password" id="new-profile-pin" placeholder="4-digit PIN (optional)" maxlength="4" pattern="[0-9]*" inputmode="numeric">
                 <div class="pin-actions">
@@ -358,7 +367,87 @@ function showCreateProfileForm() {
     });
 }
 
-function attachCreateFormListeners(formId, isFirstRun = false) {
+function showEditProfileForm() {
+    if (!currentProfile) return;
+
+    const hasPin = currentProfile.has_pin;
+    const modal = document.createElement('div');
+    modal.className = 'pin-modal';
+    modal.innerHTML = `
+        <div class="pin-modal-content" style="max-width:380px">
+            <h3>Edit Profile</h3>
+            <form id="edit-profile-form" class="profile-form">
+                ${buildAvatarPickerHtml(currentProfile.avatar_color, currentProfile.avatar_emoji)}
+                <div class="edit-pin-section">
+                    <label class="edit-pin-label">
+                        <input type="checkbox" id="edit-pin-toggle" ${hasPin ? 'checked' : ''}>
+                        PIN lock
+                    </label>
+                    <input type="password" id="edit-pin-input" class="${hasPin ? '' : 'hidden'}" placeholder="${hasPin ? 'New PIN (leave empty to keep)' : '4-digit PIN'}" maxlength="4" pattern="[0-9]*" inputmode="numeric">
+                </div>
+                <div class="pin-actions">
+                    <button type="button" class="pin-cancel">Cancel</button>
+                    <button type="submit">Save</button>
+                </div>
+            </form>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    attachAvatarPickerListeners('edit-profile-form');
+
+    const pinToggle = modal.querySelector('#edit-pin-toggle');
+    const pinInput = modal.querySelector('#edit-pin-input');
+    pinToggle.addEventListener('change', () => {
+        pinInput.classList.toggle('hidden', !pinToggle.checked);
+        if (!pinToggle.checked) pinInput.value = '';
+    });
+
+    modal.querySelector('.pin-cancel').addEventListener('click', () => {
+        const form = document.getElementById('edit-profile-form');
+        if (form && form._cleanupEmojiListener) form._cleanupEmojiListener();
+        modal.remove();
+    });
+
+    document.getElementById('edit-profile-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const color = form.querySelector('input[name="avatar_color"]:checked').value;
+        const emoji = form.querySelector('input[name="avatar_emoji"]').value;
+        if (form._cleanupEmojiListener) form._cleanupEmojiListener();
+
+        // Save avatar
+        try {
+            const resp = await fetch('/api/profiles/avatar', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ avatar_color: color, avatar_emoji: emoji }),
+            });
+            if (resp.ok) {
+                currentProfile = await resp.json();
+                updateProfileButton();
+            }
+        } catch {}
+
+        // Save PIN changes
+        const wantsPin = pinToggle.checked;
+        const newPin = pinInput.value.trim();
+        if (!wantsPin && hasPin) {
+            // Remove PIN
+            await fetch('/api/profiles/pin', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: null }) });
+            currentProfile.has_pin = false;
+        } else if (wantsPin && newPin) {
+            if (newPin.length === 4 && /^\d+$/.test(newPin)) {
+                await fetch('/api/profiles/pin', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: newPin }) });
+                currentProfile.has_pin = true;
+            }
+        }
+
+        modal.remove();
+    });
+}
+
+
+function attachAvatarPickerListeners(formId) {
     const form = document.getElementById(formId);
     const preview = form.querySelector('#avatar-preview');
     const emojiInput = form.querySelector('#emoji-input');
@@ -383,13 +472,11 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
 
     if (preview) {
         if (isTouchDevice()) {
-            // Mobile: tap preview → focus hidden input → OS emoji keyboard
             preview.addEventListener('click', () => {
                 emojiInput.value = '';
                 emojiInput.focus();
             });
         } else {
-            // Desktop: click preview → toggle emoji picker popup
             preview.addEventListener('click', (e) => {
                 e.stopPropagation();
                 if (emojiPopup) emojiPopup.classList.toggle('hidden');
@@ -397,7 +484,6 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
         }
     }
 
-    // Desktop emoji picker grid clicks
     if (emojiPopup) {
         emojiPopup.addEventListener('click', (e) => e.stopPropagation());
         emojiPopup.querySelectorAll('.emoji-cell').forEach(cell => {
@@ -405,7 +491,6 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
         });
     }
 
-    // Mobile: capture input from native keyboard
     if (emojiInput) {
         emojiInput.addEventListener('input', () => {
             const segments = [..._graphemeSegmenter.segment(emojiInput.value)];
@@ -416,23 +501,23 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
         });
     }
 
-    // Close popup on outside click.
-    // NOTE: this document-level listener is cleaned up via form._cleanupEmojiListener,
-    // called on both submit and cancel. If the overlay innerHTML is replaced directly
-    // (e.g. by showProfileSelector), orphaned listeners are harmless no-ops since
-    // they only toggle .hidden on the now-detached emojiPopup element.
     const closePopup = () => { if (emojiPopup) emojiPopup.classList.add('hidden'); };
     document.addEventListener('click', closePopup);
     form._cleanupEmojiListener = () => document.removeEventListener('click', closePopup);
 
-    // Color picker selection
     form.querySelectorAll('.color-option').forEach(opt => {
         opt.addEventListener('click', () => {
             form.querySelectorAll('.color-option').forEach(o => o.classList.remove('selected'));
             opt.classList.add('selected');
+            opt.querySelector('input[type="radio"]').checked = true;
             updatePreview();
         });
     });
+}
+
+function attachCreateFormListeners(formId, isFirstRun = false) {
+    attachAvatarPickerListeners(formId);
+    const form = document.getElementById(formId);
 
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -457,14 +542,17 @@ function attachCreateFormListeners(formId, isFirstRun = false) {
                     // First-run wizard: go to password setup step
                     showSetupPassword(profile);
                 } else {
-                    await selectProfile(profile.id, pin);
+                    // Show updated profile list so user can choose
+                    const listResp = await fetch('/api/profiles');
+                    const profiles = await listResp.json();
+                    showProfileSelector(profiles);
                 }
             } else {
                 const err = await resp.json();
-                alert(err.detail || 'Failed to create profile');
+                nativeAlert(err.detail || 'Failed to create profile');
             }
         } catch (err) {
-            alert('Failed to create profile');
+            nativeAlert('Failed to create profile');
         }
     });
 }
@@ -487,9 +575,12 @@ if (profileSwitcherBtn) {
         profileMenu.innerHTML = `
             <div class="profile-menu-item" data-action="history">Watch History</div>
             <div class="profile-menu-item" data-action="favorites">Favorites</div>
-            ${isAdmin ? '<div class="profile-menu-divider"></div><div class="profile-menu-item" data-action="settings">Settings</div>' : ''}
+            <div class="profile-menu-divider"></div>
+            <div class="profile-menu-item" data-action="edit-profile">Edit Profile</div>
+            ${isAdmin ? '<div class="profile-menu-item" data-action="settings">Settings</div>' : ''}
             <div class="profile-menu-divider"></div>
             <div class="profile-menu-item" data-action="switch">Switch Profile</div>
+            <div class="profile-menu-item profile-menu-logout" data-action="logout">Logout ${escapeHtml(currentProfile.name)}</div>
         `;
         // Position below the button
         const rect = profileSwitcherBtn.getBoundingClientRect();
@@ -505,14 +596,17 @@ if (profileSwitcherBtn) {
                     navigateToHistory();
                 } else if (action === 'favorites') {
                     navigateToFavorites();
+                } else if (action === 'edit-profile') {
+                    showEditProfileForm();
                 } else if (action === 'settings') {
                     showSettingsModal();
                 } else if (action === 'switch') {
-                    await fetch('/api/profiles/deselect', { method: 'POST' });
                     stopPlayer();
                     const resp = await fetch('/api/profiles');
                     const profiles = await resp.json();
                     showProfileSelector(profiles);
+                } else if (action === 'logout') {
+                    window.location.href = '/logout';
                 }
             });
         });

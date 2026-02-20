@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import Response, StreamingResponse
 
 from auth import require_auth
-from helpers import register_cleanup, make_cache_cleanup, get_video_info, http_client, is_youtube_url
+from helpers import register_cleanup, make_cache_cleanup, get_video_info, http_client, is_youtube_url, VIDEO_ID_RE
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +157,8 @@ async def get_hls_master(
     ?audio=fr  -> only French audio variants
     ?audio=original or omitted -> only default audio variants
     """
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
     # Get or fetch the full rewritten manifest
     cached = _hls_cache.get(video_id)
     if not cached or time.time() - cached['created'] >= _HLS_CACHE_TTL:
@@ -193,6 +195,8 @@ async def get_hls_master(
 @router.get("/audio-tracks/{video_id}")
 async def get_audio_tracks(video_id: str, auth: bool = Depends(require_auth)):
     """Return available audio languages for a video (from cached HLS manifest)."""
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
     cached = _hls_cache.get(video_id)
     if not cached or time.time() - cached['created'] >= _HLS_CACHE_TTL:
         # Trigger manifest fetch by calling master endpoint logic

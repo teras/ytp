@@ -1,5 +1,6 @@
 """Shared configuration, yt-dlp instances, helper functions, and cleanup registry."""
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -9,6 +10,9 @@ import httpx
 import yt_dlp
 
 log = logging.getLogger(__name__)
+
+# Shared validation regex for YouTube video IDs (used across multiple modules)
+VIDEO_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{11}$')
 
 # Cache directory for subtitle VTT files
 CACHE_DIR = Path("cache")

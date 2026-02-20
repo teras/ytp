@@ -1,8 +1,8 @@
 """Profile management routes."""
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from auth import require_auth, require_profile, get_profile_id, get_session
+from auth import require_auth, require_profile, get_profile_id, get_session, verify_session
 from helpers import maybe_long_cleanup
 import profiles_db as db
 
@@ -12,9 +12,9 @@ router = APIRouter(prefix="/api/profiles")
 # ── Request models ──────────────────────────────────────────────────────────
 
 class CreateProfileReq(BaseModel):
-    name: str
+    name: str = Field(..., pattern=r'^[a-zA-Z0-9_]+$')
     pin: str | None = None
-    avatar_color: str = "#cc0000"
+    avatar_color: str = Field(default="#cc0000", pattern=r'^#[0-9a-fA-F]{6}$|^transparent$')
     avatar_emoji: str = ""
 
 class SelectProfileReq(BaseModel):
@@ -32,6 +32,15 @@ class SavePositionReq(BaseModel):
     thumbnail: str = ""
     duration: int = 0
     duration_str: str = ""
+
+class UpdatePinReq(BaseModel):
+    pin: str | None = None  # None or empty = remove PIN
+
+
+class UpdateAvatarReq(BaseModel):
+    avatar_color: str = Field(..., pattern=r'^#[0-9a-fA-F]{6}$|^transparent$')
+    avatar_emoji: str = ""
+
 
 class FavoriteReq(BaseModel):
     title: str = ""
@@ -61,9 +70,29 @@ def _require_admin(request: Request):
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
+@router.get("/boot")
+async def boot(request: Request):
+    """Single endpoint to determine app state on load."""
+    profiles = db.list_profiles()
+    if not profiles and not db.get_app_password():
+        return {"state": "first-run"}
+    if not verify_session(request):
+        return {"state": "login-required"}
+    pid = get_profile_id(request)
+    if pid:
+        profile = db.get_profile(pid)
+        if profile:
+            return {"state": "ready", "profile": profile}
+    # Hourly cleanup (cache expiry, etc.) — runs here and in list_profiles because
+    # these are the only idle-state endpoints hit regularly. Not needed in the
+    # "ready" branch above since that returns immediately without listing.
+    maybe_long_cleanup()
+    return {"state": "profile-select", "profiles": profiles}
+
+
 @router.get("")
 async def list_profiles(auth: bool = Depends(require_auth)):
-    maybe_long_cleanup()
+    maybe_long_cleanup()  # also triggered from boot/profile-select above
     return db.list_profiles()
 
 
@@ -83,10 +112,9 @@ async def create_profile(req: CreateProfileReq, request: Request, response: Resp
     return profile
 
 
-@router.delete("/{profile_id}")
+@router.delete("/profile/{profile_id}")
 async def delete_profile(profile_id: int, request: Request, auth: bool = Depends(require_auth)):
     _require_admin(request)
-    # Can't delete yourself
     current = get_profile_id(request)
     if current == profile_id:
         raise HTTPException(status_code=400, detail="Cannot delete your own profile")
@@ -94,7 +122,6 @@ async def delete_profile(profile_id: int, request: Request, auth: bool = Depends
     if not target:
         raise HTTPException(status_code=404, detail="Profile not found")
     db.delete_profile(profile_id)
-    # Clear profile_id from any session that had this profile selected
     db.clear_profile_from_sessions(profile_id)
     return {"ok": True}
 
@@ -106,7 +133,9 @@ async def select_profile(profile_id: int, req: SelectProfileReq,
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    if profile["has_pin"]:
+    # Skip PIN check if already on this profile
+    current_pid = get_profile_id(request)
+    if profile["has_pin"] and current_pid != profile_id:
         if not req.pin or not db.verify_pin(profile_id, req.pin):
             raise HTTPException(status_code=403, detail="Invalid PIN")
     # Store in session
@@ -117,24 +146,19 @@ async def select_profile(profile_id: int, req: SelectProfileReq,
     return {"ok": True, "profile": profile}
 
 
-@router.get("/current")
-async def current_profile(request: Request, auth: bool = Depends(require_auth)):
-    pid = get_profile_id(request)
-    if pid is None:
-        raise HTTPException(status_code=404, detail="No profile selected")
-    profile = db.get_profile(pid)
-    if not profile:
-        # Profile was deleted
-        raise HTTPException(status_code=404, detail="Profile not found")
-    return profile
+@router.put("/avatar")
+async def update_avatar(req: UpdateAvatarReq, profile_id: int = Depends(require_profile)):
+    db.update_profile_avatar(profile_id, req.avatar_color, req.avatar_emoji)
+    return db.get_profile(profile_id)
 
 
-@router.post("/deselect")
-async def deselect_profile(request: Request, auth: bool = Depends(require_auth)):
-    token = request.cookies.get("ytp_session")
-    if token:
-        db.set_session_profile(token, None)
-    return {"ok": True}
+@router.put("/pin")
+async def update_pin(req: UpdatePinReq, profile_id: int = Depends(require_profile)):
+    pin = req.pin.strip() if req.pin else None
+    if pin and (len(pin) != 4 or not pin.isdigit()):
+        raise HTTPException(status_code=400, detail="PIN must be exactly 4 digits")
+    db.update_pin(profile_id, pin)
+    return {"ok": True, "has_pin": pin is not None}
 
 
 @router.put("/preferences")
@@ -181,6 +205,12 @@ async def get_favorites(limit: int = 50, offset: int = 0,
     return db.get_favorites(profile_id, limit, offset)
 
 
+@router.delete("/favorites")
+async def clear_favorites(profile_id: int = Depends(require_profile)):
+    db.clear_favorites(profile_id)
+    return {"ok": True}
+
+
 @router.post("/favorites/{video_id}")
 async def add_favorite(video_id: str, req: FavoriteReq,
                        profile_id: int = Depends(require_profile)):
@@ -212,12 +242,17 @@ async def get_settings(request: Request, auth: bool = Depends(require_auth)):
 
 
 @router.put("/settings/password")
-async def update_password(req: UpdatePasswordReq, request: Request,
+async def update_password(req: UpdatePasswordReq, request: Request, response: Response,
                           auth: bool = Depends(require_auth)):
+    first_run = db.get_app_password() is None
     # First-run: no password set yet and no profile selected — allow setting initial password
-    if db.get_app_password() is not None or get_profile_id(request) is not None:
+    if not first_run or get_profile_id(request) is not None:
         _require_admin(request)
     db.set_app_password(req.password)
+    # On first-run, create a session so subsequent calls (selectProfile) are authenticated
+    if first_run and req.password:
+        token, _ = get_session(request)
+        response.set_cookie(key="ytp_session", value=token, max_age=10 * 365 * 86400, httponly=True, samesite="lax")
     return {"ok": True, "has_password": req.password is not None and len(req.password) > 0}
 
 

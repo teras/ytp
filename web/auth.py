@@ -4,7 +4,7 @@ import secrets
 import time
 
 from html import escape as html_escape
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, HTTPException, Request, Response, Depends, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -40,6 +40,13 @@ def _cleanup():
 
 
 register_cleanup(_cleanup)
+
+
+def _safe_redirect(url: str) -> str:
+    """Ensure URL is a safe relative path (no open redirect via // or netloc)."""
+    if not url or not url.startswith("/") or url.startswith("//") or urlparse(url).netloc:
+        return "/"
+    return url
 
 
 def get_client_ip(request: Request) -> str:
@@ -253,26 +260,27 @@ async def login_page(request: Request, error: str = "", next: str = "/"):
     else:
         error_html = ""
 
-    # Only allow relative URLs to prevent open redirect
-    safe_next = next if next.startswith("/") else "/"
+    safe_next = _safe_redirect(next)
     html = LOGIN_PAGE.replace("{{ERROR_PLACEHOLDER}}", error_html)
     html = html.replace("{{NEXT_URL}}", html_escape(safe_next))
     return HTMLResponse(html)
 
 
 @router.post("/login")
-async def do_login(request: Request, response: Response, password: str = Form(...), next: str = Form(default="/")):
+async def do_login(request: Request, response: Response, password: str = Form(default=""), next: str = Form(default="/")):
     app_password = _get_password()
     if not app_password:
         return RedirectResponse(url="/", status_code=302)
 
-    # Only allow relative URLs to prevent open redirect
-    redirect_to = next if next.startswith("/") else "/"
+    redirect_to = _safe_redirect(next)
 
     ip = get_client_ip(request)
     blocked, remaining = is_ip_blocked(ip)
     if blocked:
         return RedirectResponse(url=f"/login?next={quote(redirect_to, safe='')}", status_code=302)
+
+    if not password:
+        return RedirectResponse(url=f"/login?error=Password+required&next={quote(redirect_to, safe='')}", status_code=302)
 
     if secrets.compare_digest(password, app_password):
         clear_failures(ip)
