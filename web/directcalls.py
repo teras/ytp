@@ -13,8 +13,8 @@ Why bypass yt-dlp for search/channel pagination:
 
 Endpoints used:
   - POST youtubei/v1/search   — search pagination
-  - POST youtubei/v1/browse   — channel videos pagination
-  - GET  youtube.com/watch     — related videos (HTML scrape of ytInitialData)
+  - POST youtubei/v1/browse   — channel videos/playlists pagination
+  - GET  youtube.com/watch     — related videos & playlist contents (HTML scrape)
 """
 
 import json
@@ -136,6 +136,102 @@ def _parse_video_renderer(renderer: dict) -> dict | None:
     }
 
 
+def _extract_lockup_channel(metadata: dict) -> str:
+    """Extract channel name from lockupMetadataViewModel's metadata rows."""
+    rows = (metadata
+            .get("metadata", {})
+            .get("contentMetadataViewModel", {})
+            .get("metadataRows", []))
+    for row in rows:
+        parts = row.get("metadataParts", [])
+        if parts:
+            return parts[0].get("text", {}).get("content", "")
+    return ""
+
+
+def _extract_lockup_duration(vm: dict) -> str:
+    """Extract duration string from lockupViewModel overlay badges."""
+    content_image = vm.get("contentImage", {})
+    thumb_vm = (content_image.get("thumbnailViewModel")
+                or content_image.get("collectionThumbnailViewModel", {})
+                .get("primaryThumbnail", {}).get("thumbnailViewModel")
+                or {})
+    for overlay in thumb_vm.get("overlays", []):
+        badge = overlay.get("thumbnailOverlayBadgeViewModel", {})
+        for b in badge.get("thumbnailBadges", []):
+            if "thumbnailBadgeViewModel" in b:
+                return b["thumbnailBadgeViewModel"].get("text", "")
+    return ""
+
+
+def _parse_lockup_view_model(vm: dict) -> dict | None:
+    """Extract playlist/mix info from a lockupViewModel object.
+
+    Returns a dict with type='playlist' or 'mix', plus first_video_id and
+    playlist_id from the watchEndpoint for playback.
+    """
+    content_id = vm.get("contentId", "")
+    if not content_id:
+        return None
+
+    # Determine type from contentId prefix
+    if content_id.startswith("PL"):
+        item_type = "playlist"
+    elif content_id.startswith("RD"):
+        item_type = "mix"
+    else:
+        return None
+
+    # Title
+    metadata = vm.get("metadata", {}).get("lockupMetadataViewModel", {})
+    title = metadata.get("title", {}).get("content", "")
+    if not title:
+        return None
+
+    channel = _extract_lockup_channel(metadata)
+
+    # Video count from overlay badge (e.g. "22 videos")
+    video_count = _extract_lockup_duration(vm)
+
+    # Thumbnail
+    content_image = vm.get("contentImage", {})
+    thumb_vm = (content_image.get("thumbnailViewModel")
+                or content_image.get("collectionThumbnailViewModel", {})
+                .get("primaryThumbnail", {}).get("thumbnailViewModel")
+                or {})
+    thumbnails = thumb_vm.get("image", {}).get("sources", [])
+    thumbnail = thumbnails[0].get("url", "") if thumbnails else ""
+
+    # watchEndpoint — first video ID and playlist ID for playback
+    first_video_id = ""
+    playlist_id = ""
+    renderer_ctx = vm.get("rendererContext", {})
+    command_ctx = renderer_ctx.get("commandContext", {})
+    on_tap = command_ctx.get("onTap", {})
+    inner_cmd = on_tap.get("innertubeCommand", {})
+    watch_ep = inner_cmd.get("watchEndpoint", {})
+    if watch_ep:
+        first_video_id = watch_ep.get("videoId", "")
+        playlist_id = watch_ep.get("playlistId", "")
+
+    if not first_video_id:
+        return None
+
+    if not thumbnail:
+        thumbnail = f"https://i.ytimg.com/vi/{first_video_id}/mqdefault.jpg"
+
+    return {
+        "id": content_id,
+        "type": item_type,
+        "title": title,
+        "channel": channel or "Unknown",
+        "video_count": video_count,
+        "thumbnail": thumbnail,
+        "first_video_id": first_video_id,
+        "playlist_id": playlist_id,
+    }
+
+
 def _extract_continuation_token(items: list) -> str | None:
     """Find the continuation token in a list of renderer items."""
     for item in items:
@@ -201,6 +297,13 @@ async def search_first(query: str) -> tuple[list[dict], str | None]:
                 video = _parse_video_renderer(renderer)
                 if video:
                     results.append(video)
+            else:
+                # Playlist/mix items use lockupViewModel
+                lvm = item.get("lockupViewModel")
+                if lvm:
+                    parsed = _parse_lockup_view_model(lvm)
+                    if parsed:
+                        results.append(parsed)
 
         # Continuation token may be at the section level
         if not token:
@@ -240,6 +343,14 @@ async def search_next(continuation_token: str) -> tuple[list[dict], str | None]:
                 video = _parse_video_renderer(renderer)
                 if video:
                     results.append(video)
+                continue
+
+            lvm = item.get("lockupViewModel")
+            if lvm:
+                parsed = _parse_lockup_view_model(lvm)
+                if parsed:
+                    results.append(parsed)
+                continue
 
             # Also check inside itemSectionRenderer (some responses nest further)
             section_items = item.get("itemSectionRenderer", {}).get("contents", [])
@@ -249,6 +360,10 @@ async def search_next(continuation_token: str) -> tuple[list[dict], str | None]:
                     video = _parse_video_renderer(renderer)
                     if video:
                         results.append(video)
+                elif sub_item.get("lockupViewModel"):
+                    parsed = _parse_lockup_view_model(sub_item["lockupViewModel"])
+                    if parsed:
+                        results.append(parsed)
 
         token = _extract_continuation_token(items)
 
@@ -310,7 +425,7 @@ async def channel_first(channel_id: str) -> tuple[str, list[dict], str | None]:
 
         token = _extract_continuation_token(grid_items)
 
-        # Also try sectionListRenderer path (older layout)
+        # Fallback: sectionListRenderer (some channels still use the older layout)
         if not results:
             section_contents = (tab_renderer
                                 .get("content", {})
@@ -319,8 +434,7 @@ async def channel_first(channel_id: str) -> tuple[str, list[dict], str | None]:
             for section in section_contents:
                 items = (section
                          .get("itemSectionRenderer", {})
-                         .get("contents", [])
-                         or [])
+                         .get("contents", []))
                 for cont in items:
                     grid = cont.get("gridRenderer", {}).get("items", [])
                     for grid_item in grid:
@@ -367,10 +481,9 @@ async def channel_next(continuation_token: str) -> tuple[list[dict], str | None]
                 video = _parse_video_renderer(renderer)
                 if video:
                     results.append(video)
-
-            # Also try gridVideoRenderer (older layout)
-            renderer = item.get("gridVideoRenderer")
-            if renderer:
+            elif item.get("gridVideoRenderer"):
+                # Older layout fallback
+                renderer = item["gridVideoRenderer"]
                 video = _parse_video_renderer(renderer)
                 if video:
                     results.append(video)
@@ -382,14 +495,72 @@ async def channel_next(continuation_token: str) -> tuple[list[dict], str | None]
 
 # ── Related Videos ───────────────────────────────────────────────────────────
 
+def _parse_related_video(vm: dict, content_id: str) -> dict | None:
+    """Extract a regular video from a lockupViewModel in related results."""
+    metadata = vm.get("metadata", {}).get("lockupMetadataViewModel", {})
+    title = metadata.get("title", {}).get("content", "")
+    if not title:
+        return None
+
+    channel = _extract_lockup_channel(metadata)
+    duration_str = _extract_lockup_duration(vm)
+
+    return {
+        "id": content_id,
+        "title": title,
+        "channel": channel,
+        "duration_str": duration_str,
+        "thumbnail": f"https://i.ytimg.com/vi/{content_id}/mqdefault.jpg",
+    }
+
+
+def _extract_yt_initial_data(html: str) -> dict | None:
+    """Extract ytInitialData JSON from YouTube watch page HTML."""
+    match = re.search(r"var ytInitialData\s*=\s*\{", html)
+    if not match:
+        return None
+
+    start = match.end() - 1
+    depth = 0
+    in_string = False
+    escape = False
+    end = start
+    for i in range(start, len(html)):
+        ch = html[i]
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    try:
+        return json.loads(html[start:end])
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 async def fetch_related(video_id: str) -> list[dict]:
-    """Fetch related videos for a given video ID.
+    """Fetch related videos and mixes for a given video ID.
 
     GET youtube.com/watch?v=ID → parse ytInitialData from HTML.
     Navigates twoColumnWatchNextResults → secondaryResults.
-    Filters out RD* (mix/playlist) IDs.
+    Includes mixes (RD*) alongside regular videos.
+    Dedup: if a mix's first video also exists standalone, remove standalone.
 
-    Returns list of video dicts (may be empty on error).
+    Returns list of dicts (may be empty on error).
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -398,40 +569,10 @@ async def fetch_related(video_id: str) -> list[dict]:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         })
-        html = resp.text
 
-        match = re.search(r"var ytInitialData\s*=\s*\{", html)
-        if not match:
+        data = _extract_yt_initial_data(resp.text)
+        if not data:
             return []
-
-        # Extract JSON by counting braces (regex {.*?} is fragile with nested JSON)
-        start = match.end() - 1  # position of opening {
-        depth = 0
-        in_string = False
-        escape = False
-        end = start
-        for i in range(start, len(html)):
-            ch = html[i]
-            if escape:
-                escape = False
-                continue
-            if ch == '\\' and in_string:
-                escape = True
-                continue
-            if ch == '"' and not escape:
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-
-        data = json.loads(html[start:end])
 
         contents = data.get("contents", {}).get("twoColumnWatchNextResults", {})
         secondary = (contents
@@ -440,54 +581,217 @@ async def fetch_related(video_id: str) -> list[dict]:
                      .get("results", []))
 
         related = []
+        mix_first_video_ids = set()
+
         for item in secondary:
-            if "lockupViewModel" in item:
-                vm = item["lockupViewModel"]
-                content_id = vm.get("contentId", "")
+            if "lockupViewModel" not in item:
+                continue
+            vm = item["lockupViewModel"]
+            content_id = vm.get("contentId", "")
 
-                if content_id.startswith(("RD", "PL")):
-                    continue
+            if content_id.startswith("RD"):
+                # Parse as mix
+                parsed = _parse_lockup_view_model(vm)
+                if parsed:
+                    related.append(parsed)
+                    mix_first_video_ids.add(parsed["first_video_id"])
+                continue
 
-                metadata = vm.get("metadata", {}).get("lockupMetadataViewModel", {})
-                title = metadata.get("title", {}).get("content", "")
+            if content_id.startswith("PL"):
+                # Skip playlists in related (per plan: related has videos + mixes only)
+                continue
 
-                channel = ""
-                metadata_rows = (metadata
-                                 .get("metadata", {})
-                                 .get("contentMetadataViewModel", {})
-                                 .get("metadataRows", []))
-                if metadata_rows:
-                    for row in metadata_rows:
-                        parts = row.get("metadataParts", [])
-                        if parts:
-                            channel = parts[0].get("text", {}).get("content", "")
-                            break
+            # Regular video — parse metadata inline (videos don't have
+            # watchEndpoint so _parse_lockup_view_model would reject them)
+            video = _parse_related_video(vm, content_id)
+            if video:
+                related.append(video)
 
-                duration_str = ""
-                content_image = vm.get("contentImage", {})
-                thumb_vm = (content_image.get("thumbnailViewModel")
-                            or content_image.get("collectionThumbnailViewModel", {})
-                            .get("primaryThumbnail", {}).get("thumbnailViewModel")
-                            or {})
-                overlays = thumb_vm.get("overlays", [])
-                for overlay in overlays:
-                    badge = overlay.get("thumbnailOverlayBadgeViewModel", {})
-                    for b in badge.get("thumbnailBadges", []):
-                        if "thumbnailBadgeViewModel" in b:
-                            duration_str = b["thumbnailBadgeViewModel"].get("text", "")
-                            break
-
-                if content_id and title:
-                    related.append({
-                        "id": content_id,
-                        "title": title,
-                        "channel": channel,
-                        "duration_str": duration_str,
-                        "thumbnail": f"https://i.ytimg.com/vi/{content_id}/mqdefault.jpg",
-                    })
+        # Dedup: remove standalone videos whose ID matches a mix's first video
+        if mix_first_video_ids:
+            related = [r for r in related
+                       if r.get("type") or r["id"] not in mix_first_video_ids]
 
         return related
 
     except Exception as e:
         log.error(f"Related videos error: {e}")
         return []
+
+
+# ── Playlist/Mix Contents ────────────────────────────────────────────────────
+
+async def fetch_playlist_contents(video_id: str, playlist_id: str) -> dict:
+    """Fetch playlist/mix contents from YouTube watch page.
+
+    GET youtube.com/watch?v={video_id}&list={playlist_id}
+    Parses ytInitialData → twoColumnWatchNextResults → playlist.playlist.contents[]
+
+    Returns {"title": str, "videos": [...]}.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}&list={playlist_id}"
+
+    try:
+        resp = await http_client.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+
+        data = _extract_yt_initial_data(resp.text)
+        if not data:
+            return {"title": "", "videos": []}
+
+        playlist_data = (data
+                         .get("contents", {})
+                         .get("twoColumnWatchNextResults", {})
+                         .get("playlist", {})
+                         .get("playlist", {}))
+
+        title = playlist_data.get("title", "")
+        contents = playlist_data.get("contents", [])
+
+        videos = []
+        for item in contents:
+            renderer = item.get("playlistPanelVideoRenderer", {})
+            vid = renderer.get("videoId", "")
+            if not vid:
+                continue
+
+            title_obj = renderer.get("title", {})
+            vtitle = title_obj.get("simpleText", "")
+            if not vtitle:
+                vtitle_runs = title_obj.get("runs", [])
+                vtitle = vtitle_runs[0].get("text", "") if vtitle_runs else ""
+
+            vchannel = ""
+            short_byline = renderer.get("shortBylineText", {}).get("runs", [])
+            if short_byline:
+                vchannel = short_byline[0].get("text", "")
+
+            duration_text = renderer.get("lengthText", {})
+            vduration_str = duration_text.get("simpleText", "")
+            if not vduration_str:
+                runs = duration_text.get("runs", [])
+                if runs:
+                    vduration_str = runs[0].get("text", "")
+
+            videos.append({
+                "id": vid,
+                "title": vtitle,
+                "channel": vchannel,
+                "duration_str": vduration_str,
+                "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+            })
+
+        return {"title": title, "videos": videos}
+
+    except Exception as e:
+        log.error(f"Playlist contents error: {e}")
+        return {"title": "", "videos": []}
+
+
+# ── Channel Playlists Tab ────────────────────────────────────────────────────
+
+# Protobuf-encoded params for the "Playlists" tab
+_CHANNEL_PLAYLISTS_PARAMS = "EglwbGF5bGlzdHPyBgQKAkIA"
+
+
+async def channel_playlists_first(channel_id: str) -> tuple[str, list[dict], str | None]:
+    """Initial channel playlists request.
+
+    POST youtubei/v1/browse with browseId + Playlists tab params.
+    Returns (channel_name, results, continuation_token).
+    """
+    data = await _innertube_post("browse", {
+        "browseId": channel_id,
+        "params": _CHANNEL_PLAYLISTS_PARAMS,
+    })
+
+    channel_name = (data.get("metadata", {})
+                    .get("channelMetadataRenderer", {})
+                    .get("title", "Unknown"))
+
+    results = []
+    token = None
+
+    tabs = (data
+            .get("contents", {})
+            .get("twoColumnBrowseResultsRenderer", {})
+            .get("tabs", []))
+
+    for tab in tabs:
+        tab_renderer = tab.get("tabRenderer", {})
+        if not tab_renderer.get("selected", False):
+            continue
+
+        # richGridRenderer path (modern layout)
+        grid_items = (tab_renderer
+                      .get("content", {})
+                      .get("richGridRenderer", {})
+                      .get("contents", []))
+
+        for item in grid_items:
+            rich_item = item.get("richItemRenderer", {})
+            lvm = rich_item.get("content", {}).get("lockupViewModel")
+            if lvm:
+                parsed = _parse_lockup_view_model(lvm)
+                if parsed:
+                    results.append(parsed)
+
+        token = _extract_continuation_token(grid_items)
+
+        # Fallback: sectionListRenderer (some channels still use the older layout)
+        if not results:
+            section_contents = (tab_renderer
+                                .get("content", {})
+                                .get("sectionListRenderer", {})
+                                .get("contents", []))
+            for section in section_contents:
+                items = (section
+                         .get("itemSectionRenderer", {})
+                         .get("contents", []))
+                for cont in items:
+                    grid = cont.get("gridRenderer", {}).get("items", [])
+                    for grid_item in grid:
+                        lvm = grid_item.get("lockupViewModel")
+                        if lvm:
+                            parsed = _parse_lockup_view_model(lvm)
+                            if parsed:
+                                results.append(parsed)
+                    if not token:
+                        token = _extract_continuation_token(grid)
+
+        break
+
+    return channel_name, results, token
+
+
+async def channel_playlists_next(continuation_token: str) -> tuple[list[dict], str | None]:
+    """Paginated channel playlists request using a continuation token."""
+    data = await _innertube_post("browse", {
+        "continuation": continuation_token,
+    })
+
+    results = []
+    token = None
+
+    actions = (data.get("onResponseReceivedActions", [])
+               or data.get("onResponseReceivedCommands", []))
+
+    for action in actions:
+        items = (action.get("appendContinuationItemsAction", {})
+                 .get("continuationItems", []))
+        for item in items:
+            rich_item = item.get("richItemRenderer", {})
+            lvm = rich_item.get("content", {}).get("lockupViewModel")
+            if not lvm:
+                # Fallback: direct lockupViewModel (older layout)
+                lvm = item.get("lockupViewModel")
+            if lvm:
+                parsed = _parse_lockup_view_model(lvm)
+                if parsed:
+                    results.append(parsed)
+
+        token = _extract_continuation_token(items)
+
+    return results, token

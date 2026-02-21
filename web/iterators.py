@@ -12,7 +12,8 @@ import time
 from dataclasses import dataclass, field
 
 from helpers import register_cleanup
-from directcalls import search_first, search_next, channel_first, channel_next
+from directcalls import (search_first, search_next, channel_first, channel_next,
+                         channel_playlists_first, channel_playlists_next)
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,26 @@ async def create_channel(session_token: str, channel_id: str) -> tuple[str, list
     return channel_name, results, cursor_id
 
 
+async def create_channel_playlists(session_token: str, channel_id: str) -> tuple[str, list[dict], str | None]:
+    """Get channel playlists and return (channel_name, first_batch, cursor_id)."""
+    channel_name, results, yt_token = await channel_playlists_first(channel_id)
+
+    if not results:
+        return channel_name, [], None
+
+    if not yt_token:
+        return channel_name, results, None
+
+    cursor_id = secrets.token_urlsafe(16)
+    _get_bucket(session_token)[cursor_id] = CursorState(
+        type="channel_playlists",
+        continuation_token=yt_token,
+        channel_name=channel_name,
+        pulled=len(results),
+    )
+    return channel_name, results, cursor_id
+
+
 async def fetch_more(session_token: str, cursor_id: str) -> tuple[list[dict], str | None]:
     """Fetch next batch using a cursor ID.
 
@@ -98,6 +119,8 @@ async def fetch_more(session_token: str, cursor_id: str) -> tuple[list[dict], st
         results, yt_token = await search_next(state.continuation_token)
     elif state.type == "channel":
         results, yt_token = await channel_next(state.continuation_token)
+    elif state.type == "channel_playlists":
+        results, yt_token = await channel_playlists_next(state.continuation_token)
     else:
         bucket.pop(cursor_id, None)
         return [], None

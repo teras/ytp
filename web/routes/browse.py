@@ -9,8 +9,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
 
 from auth import require_auth, get_session
 from helpers import VIDEO_ID_RE
-from iterators import create_search, create_channel, fetch_more
-from directcalls import fetch_related
+from iterators import create_search, create_channel, create_channel_playlists, fetch_more
+from directcalls import fetch_related, fetch_playlist_contents
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +40,8 @@ async def search(request: Request, q: str = Query(..., min_length=1), auth: bool
 
     try:
         results, cursor = await create_search(token, q)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Search failed")
 
     return _json_with_cookie({'results': results, 'cursor': cursor}, token, request)
 
@@ -86,7 +86,7 @@ async def get_channel_videos(
         channel_name, results, cursor = await create_channel(token, channel_id)
     except Exception as e:
         log.error(f"Channel videos error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to load channel videos")
 
     return _json_with_cookie({
         'channel': channel_name,
@@ -94,3 +94,48 @@ async def get_channel_videos(
         'results': results,
         'cursor': cursor
     }, token, request)
+
+
+@router.get("/channel/{channel_id}/playlists")
+async def get_channel_playlists(
+    request: Request,
+    channel_id: str,
+    auth: bool = Depends(require_auth)
+):
+    """Get playlists from a channel. Returns first batch + cursor for pagination."""
+    if not _CHANNEL_ID_RE.match(channel_id):
+        raise HTTPException(status_code=400, detail="Invalid channel ID")
+    token, session = get_session(request)
+
+    try:
+        channel_name, results, cursor = await create_channel_playlists(token, channel_id)
+    except Exception as e:
+        log.error(f"Channel playlists error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load channel playlists")
+
+    return _json_with_cookie({
+        'channel': channel_name,
+        'channel_id': channel_id,
+        'results': results,
+        'cursor': cursor
+    }, token, request)
+
+
+_PLAYLIST_ID_RE = re.compile(r'^(PL|RD)[a-zA-Z0-9_-]+$')
+
+
+@router.get("/playlist-contents")
+async def get_playlist_contents(
+    request: Request,
+    video_id: str = Query(..., min_length=1),
+    playlist_id: str = Query(..., min_length=1),
+    auth: bool = Depends(require_auth)
+):
+    """Get playlist/mix contents (list of videos)."""
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
+    if not _PLAYLIST_ID_RE.match(playlist_id):
+        raise HTTPException(status_code=400, detail="Invalid playlist ID")
+    token, session = get_session(request)
+    result = await fetch_playlist_contents(video_id, playlist_id)
+    return _json_with_cookie(result, token, request)

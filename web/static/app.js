@@ -154,7 +154,7 @@ function populateAudioMenu(tracks, currentLang) {
     audioMenu.innerHTML = tracks.map(track => {
         const selected = track.lang === currentLang ? ' selected' : '';
         const label = track.lang === 'original' ? 'Original' : langName(track.lang);
-        const isDefault = track.default ? ' (original)' : '';
+        const isDefault = track.default && track.lang !== 'original' ? ' (original)' : '';
         return `<div class="audio-option${selected}" data-lang="${escapeAttr(track.lang)}">
             <span>${label}${isDefault}</span>
         </div>`;
@@ -219,6 +219,8 @@ function showListView() {
     listView.classList.remove('hidden');
     videoView.classList.add('hidden');
     stopPlayer();
+    // Close queue when leaving video view
+    if (typeof _closeQueue === 'function') _closeQueue();
 }
 
 function showVideoView() {
@@ -293,6 +295,8 @@ function handleInitialRoute() {
 }
 
 async function loadListPage(endpoint, title, {showClear = false, removable = false, clearEndpoint = '', clearPrompt = ''} = {}) {
+    if (typeof _removeChannelTabs === 'function') _removeChannelTabs();
+    if (typeof _removeFilterToggles === 'function') _removeFilterToggles();
     listHeader.classList.remove('hidden');
     listTitle.textContent = title;
     clearListBtn.classList.toggle('hidden', !showClear);

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Panayotis Katsaloulis
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Search, channel browsing, and video grid rendering
+// Search, channel browsing, video grid rendering, queue mode
 
 let currentQuery = '';
 let currentChannelId = null;
@@ -8,8 +8,22 @@ let currentCursor = null;
 let isLoadingMore = false;
 let hasMoreResults = true;
 let listViewCache = null;
-let listViewMode = 'search'; // 'search' or 'channel'
+let listViewMode = 'search'; // 'search' | 'channel' | 'channel_playlists'
 let _listGeneration = 0; // incremented on every new search/channel/list load to discard stale responses
+
+// Search raw data + filter state
+let _searchRawResults = []; // all fetched results (never filtered)
+let _searchFilters = { video: true, playlist: true, mix: true };
+
+// Related raw data
+let _relatedRawResults = [];
+
+// Channel tabs state
+let _channelTab = 'videos'; // 'videos' | 'playlists'
+
+// Queue mode state
+let _queue = null; // { title, videos[], currentIndex, playlistId }
+let _queueCollapsed = false;
 
 const loadMoreObserver = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting && !isLoadingMore && hasMoreResults) {
@@ -28,6 +42,7 @@ async function searchVideos(query) {
     currentChannelId = null;
     currentCursor = null;
     hasMoreResults = true;
+    _searchRawResults = [];
     const gen = ++_listGeneration;
 
     if (window.location.pathname !== '/') {
@@ -35,11 +50,13 @@ async function searchVideos(query) {
     }
 
     showListView();
+    _removeChannelTabs();
     listHeader.classList.add('hidden');
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
     loadMoreContainer.classList.add('hidden');
     loadMoreObserver.disconnect();
+    _removeFilterToggles();
     showLoadingCard(true);
 
     try {
@@ -58,7 +75,8 @@ async function searchVideos(query) {
             noResults.classList.remove('hidden');
             hasMoreResults = false;
         } else {
-            renderVideos(data.results);
+            _searchRawResults = data.results;
+            _renderSearchFiltered();
             currentCursor = data.cursor;
             hasMoreResults = !!data.cursor;
             loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
@@ -74,10 +92,71 @@ async function searchVideos(query) {
 }
 
 
+// ── Search Filters ──────────────────────────────────────────────────────────
+
+function _hasPlaylists() { return _searchRawResults.some(r => r.type === 'playlist' || r.type === 'mix'); }
+
+function _removeFilterToggles() {
+    const existing = document.getElementById('search-filter-toggles');
+    if (existing) existing.remove();
+}
+
+function _renderFilterToggles() {
+    _removeFilterToggles();
+    if (!_hasPlaylists()) return;
+
+    const container = document.createElement('div');
+    container.id = 'search-filter-toggles';
+    container.className = 'filter-toggles';
+
+    // Visibility group
+    const group = document.createElement('div');
+    group.className = 'filter-group';
+    ['video', 'playlist', 'mix'].forEach(type => {
+        const btn = document.createElement('button');
+        btn.className = `filter-btn${_searchFilters[type] ? ' active' : ''}`;
+        btn.textContent = type === 'video' ? 'Videos' : type === 'playlist' ? 'Playlists' : 'Mixes';
+        btn.addEventListener('click', () => {
+            _searchFilters[type] = !_searchFilters[type];
+            btn.classList.toggle('active', _searchFilters[type]);
+            _renderSearchFiltered();
+        });
+        group.appendChild(btn);
+    });
+    container.appendChild(group);
+
+    videoGrid.parentNode.insertBefore(container, videoGrid);
+}
+
+function _applySearchFilters(results) {
+    const { video, playlist, mix } = _searchFilters;
+
+    return results.filter(r => {
+        if (!r.type) return video;
+        if (r.type === 'playlist') return playlist;
+        if (r.type === 'mix') return mix;
+        return true;
+    });
+}
+
+function _renderSearchFiltered() {
+    const filtered = _applySearchFilters(_searchRawResults);
+    _renderFilterToggles();
+    videoGrid.innerHTML = filtered.map(r => createVideoCard(r)).join('');
+    attachCardListeners(videoGrid);
+    if (filtered.length === 0) {
+        noResults.classList.remove('hidden');
+    } else {
+        noResults.classList.add('hidden');
+    }
+}
+
+
 // ── Channel ─────────────────────────────────────────────────────────────────
 
 async function loadChannelVideos(channelId, channelName) {
     listViewMode = 'channel';
+    _channelTab = 'videos';
     currentChannelId = channelId;
     currentQuery = '';
     currentCursor = null;
@@ -87,6 +166,9 @@ async function loadChannelVideos(channelId, channelName) {
     showListView();
     listHeader.classList.remove('hidden');
     listTitle.textContent = channelName || 'Channel';
+    clearListBtn.classList.add('hidden');
+    _removeFilterToggles();
+    _renderChannelTabs(channelId);
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
     loadMoreContainer.classList.add('hidden');
@@ -129,6 +211,81 @@ async function loadChannelVideos(channelId, channelName) {
 }
 
 
+// ── Channel Tabs ────────────────────────────────────────────────────────────
+
+function _removeChannelTabs() {
+    const existing = document.getElementById('channel-tabs');
+    if (existing) existing.remove();
+}
+
+function _renderChannelTabs(channelId) {
+    _removeChannelTabs();
+    const tabs = document.createElement('div');
+    tabs.id = 'channel-tabs';
+    tabs.className = 'channel-tabs';
+
+    ['videos', 'playlists'].forEach(tab => {
+        const btn = document.createElement('button');
+        btn.className = `channel-tab${_channelTab === tab ? ' active' : ''}`;
+        btn.textContent = tab === 'videos' ? 'Videos' : 'Playlists';
+        btn.addEventListener('click', () => {
+            if (_channelTab === tab) return;
+            _channelTab = tab;
+            tabs.querySelectorAll('.channel-tab').forEach(b => b.classList.toggle('active', b === btn));
+            if (tab === 'videos') {
+                loadChannelVideos(channelId, listTitle.textContent);
+            } else {
+                _loadChannelPlaylists(channelId);
+            }
+        });
+        tabs.appendChild(btn);
+    });
+
+    // Insert after list header
+    listHeader.insertAdjacentElement('afterend', tabs);
+}
+
+async function _loadChannelPlaylists(channelId) {
+    listViewMode = 'channel_playlists';
+    currentCursor = null;
+    hasMoreResults = true;
+    const gen = ++_listGeneration;
+
+    videoGrid.innerHTML = '';
+    noResults.classList.add('hidden');
+    loadMoreContainer.classList.add('hidden');
+    loadMoreObserver.disconnect();
+    showLoadingCard(true);
+
+    try {
+        const response = await fetch(`/api/channel/${channelId}/playlists`);
+        if (gen !== _listGeneration) return;
+        const data = await response.json();
+
+        if (!response.ok) throw new Error('Failed to load playlists');
+
+        showLoadingCard(false);
+
+        if (data.results.length === 0) {
+            noResults.classList.remove('hidden');
+            hasMoreResults = false;
+        } else {
+            renderVideos(data.results);
+            currentCursor = data.cursor;
+            hasMoreResults = !!data.cursor;
+            loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
+        }
+    } catch (error) {
+        if (gen !== _listGeneration) return;
+        showLoadingCard(false);
+        videoGrid.innerHTML = `<p class="error">Error: ${escapeHtml(error.message)}</p>`;
+        hasMoreResults = false;
+    }
+
+    if (gen === _listGeneration) loadMoreObserver.observe(loadMoreContainer);
+}
+
+
 // ── Load More (shared) ──────────────────────────────────────────────────────
 
 async function loadMore() {
@@ -148,7 +305,13 @@ async function loadMore() {
             throw new Error('Load more failed');
         }
 
-        appendVideos(data.results);
+        if (listViewMode === 'search') {
+            _searchRawResults = _searchRawResults.concat(data.results);
+            const filtered = _applySearchFilters(data.results);
+            appendVideos(filtered);
+        } else {
+            appendVideos(data.results);
+        }
         currentCursor = data.cursor;
         hasMoreResults = !!data.cursor && data.results.length > 0;
         loadMoreContainer.classList.toggle('hidden', !hasMoreResults);
@@ -187,20 +350,39 @@ function showLoadingCard(show) {
     }
 }
 
-function createVideoCard(video) {
-    const meta = video.is_live ? '<span class="video-live">LIVE</span>'
-               : video.published ? `<span class="video-published">${escapeHtml(video.published)}</span>`
+function createVideoCard(item) {
+    // Playlist/mix card
+    if (item.type === 'playlist' || item.type === 'mix') {
+        const badgeClass = item.type === 'playlist' ? 'badge-playlist' : 'badge-mix';
+        const badgeLabel = item.type === 'playlist' ? 'Playlist' : 'Mix';
+        const countBadge = item.video_count ? `<span class="video-count">${escapeHtml(item.video_count)}</span>` : '';
+        return `<div class="video-card" data-id="${escapeAttr(item.first_video_id || item.id)}" data-title="${escapeAttr(item.title)}" data-channel="${escapeAttr(item.channel || '')}" data-duration="0" data-playlist-id="${escapeAttr(item.playlist_id || item.id)}" data-item-type="${escapeAttr(item.type)}">
+            <div class="thumbnail-container">
+                <img src="${escapeAttr(item.thumbnail)}" alt="${escapeHtml(item.title)}" loading="lazy">
+                ${countBadge}
+                <span class="${badgeClass}">${badgeLabel}</span>
+            </div>
+            <div class="video-info">
+                <h3 class="video-title">${escapeHtml(item.title)}</h3>
+                <p class="channel">${escapeHtml(item.channel || '')}</p>
+            </div>
+        </div>`;
+    }
+
+    // Regular video card
+    const meta = item.is_live ? '<span class="video-live">LIVE</span>'
+               : item.published ? `<span class="video-published">${escapeHtml(item.published)}</span>`
                : '';
-    const durationBadge = video.is_live ? '<span class="duration live">LIVE</span>'
-                        : `<span class="duration">${video.duration_str}</span>`;
-    return `<div class="video-card" data-id="${video.id}" data-title="${escapeAttr(video.title)}" data-channel="${escapeAttr(video.channel)}" data-duration="${video.duration}">
+    const durationBadge = item.is_live ? '<span class="duration live">LIVE</span>'
+                        : item.duration_str ? `<span class="duration">${escapeHtml(item.duration_str)}</span>` : '';
+    return `<div class="video-card" data-id="${escapeAttr(item.id)}" data-title="${escapeAttr(item.title)}" data-channel="${escapeAttr(item.channel || '')}" data-duration="${item.duration || 0}">
         <div class="thumbnail-container">
-            <img src="${video.thumbnail}" alt="${escapeHtml(video.title)}" loading="lazy">
+            <img src="${escapeAttr(item.thumbnail)}" alt="${escapeHtml(item.title)}" loading="lazy">
             ${durationBadge}
         </div>
         <div class="video-info">
-            <h3 class="video-title">${escapeHtml(video.title)}</h3>
-            <p class="channel">${escapeHtml(video.channel)}${meta ? ' · ' : ''}${meta}</p>
+            <h3 class="video-title">${escapeHtml(item.title)}</h3>
+            <p class="channel">${escapeHtml(item.channel)}${meta ? ' \u00b7 ' : ''}${meta}</p>
         </div>
     </div>`;
 }
@@ -208,12 +390,23 @@ function createVideoCard(video) {
 function attachCardListeners(container) {
     container.querySelectorAll('.video-card:not([data-attached])').forEach(card => {
         card.dataset.attached = 'true';
-        card.addEventListener('click', () => navigateToVideo(
-            card.dataset.id,
-            card.dataset.title,
-            card.dataset.channel,
-            parseInt(card.dataset.duration) || 0
-        ));
+        const playlistId = card.dataset.playlistId;
+        const itemType = card.dataset.itemType;
+        if (playlistId && (itemType === 'playlist' || itemType === 'mix')) {
+            card.addEventListener('click', () => {
+                const videoId = card.dataset.id;
+                const title = card.dataset.title;
+                const channel = card.dataset.channel;
+                _startQueue(videoId, title, channel, playlistId);
+            });
+        } else {
+            card.addEventListener('click', () => navigateToVideo(
+                card.dataset.id,
+                card.dataset.title,
+                card.dataset.channel,
+                parseInt(card.dataset.duration) || 0
+            ));
+        }
     });
 }
 
@@ -241,26 +434,46 @@ async function fetchRelatedVideos(videoId) {
         const response = await fetch(`/api/related/${videoId}`);
         const data = await response.json();
 
-        relatedVideos.innerHTML = '';
-
-        if (data.results && data.results.length > 0) {
-            data.results.forEach(video => {
-                relatedVideos.insertAdjacentHTML('beforeend', createRelatedCard(video));
-            });
-            attachRelatedListeners();
-        } else {
-            relatedVideos.innerHTML = '<p style="color: #717171; font-size: 14px;">No related videos found</p>';
-        }
+        _relatedRawResults = data.results || [];
+        _renderRelatedFiltered();
     } catch (error) {
         relatedVideos.innerHTML = '<p style="color: #ff4444; font-size: 14px;">Failed to load related videos</p>';
     }
 }
 
+function _renderRelatedFiltered() {
+    relatedVideos.innerHTML = '';
+
+    const results = _relatedRawResults;
+    if (results.length > 0) {
+        results.forEach(video => {
+            relatedVideos.insertAdjacentHTML('beforeend', createRelatedCard(video));
+        });
+        attachRelatedListeners();
+    } else {
+        relatedVideos.innerHTML = '<p style="color: #717171; font-size: 14px;">No related videos found</p>';
+    }
+}
+
 function createRelatedCard(video) {
-    return `<div class="related-card" data-id="${video.id}" data-title="${escapeAttr(video.title)}" data-channel="${escapeAttr(video.channel || '')}" data-duration="0">
+    const isMixOrPlaylist = video.type === 'mix' || video.type === 'playlist';
+    let badge;
+    if (isMixOrPlaylist) {
+        const label = video.type === 'playlist' ? 'Playlist' : 'Mix';
+        const countBadge = video.video_count ? `<span class="video-count">${escapeHtml(video.video_count)}</span>` : '';
+        badge = `${countBadge}<span class="badge-${escapeAttr(video.type)}">${label}</span>`;
+    } else {
+        badge = video.duration_str ? `<span class="duration">${escapeHtml(video.duration_str)}</span>` : '';
+    }
+
+    const dataAttrs = isMixOrPlaylist
+        ? `data-id="${escapeAttr(video.first_video_id || video.id)}" data-playlist-id="${escapeAttr(video.playlist_id || video.id)}" data-item-type="${escapeAttr(video.type)}"`
+        : `data-id="${escapeAttr(video.id)}"`;
+
+    return `<div class="related-card" ${dataAttrs} data-title="${escapeAttr(video.title)}" data-channel="${escapeAttr(video.channel || '')}" data-duration="0">
         <div class="thumbnail-container">
-            <img src="${video.thumbnail}" alt="${escapeHtml(video.title)}" loading="lazy">
-            ${video.duration_str ? `<span class="duration">${video.duration_str}</span>` : ''}
+            <img src="${escapeAttr(video.thumbnail)}" alt="${escapeHtml(video.title)}" loading="lazy">
+            ${badge}
         </div>
         <div class="related-info">
             <div class="related-title">${escapeHtml(video.title)}</div>
@@ -272,15 +485,159 @@ function createRelatedCard(video) {
 function attachRelatedListeners() {
     relatedVideos.querySelectorAll('.related-card:not([data-attached])').forEach(card => {
         card.dataset.attached = 'true';
-        card.addEventListener('click', () => {
-            const videoId = card.dataset.id;
-            const title = card.dataset.title;
-            const channel = card.dataset.channel;
-            history.pushState({ view: 'video', videoId, title, channel, duration: 0 }, '', `/watch?v=${videoId}`);
-            playVideo(videoId, title, channel, 0);
-        });
+        const playlistId = card.dataset.playlistId;
+        const itemType = card.dataset.itemType;
+        if (playlistId && (itemType === 'playlist' || itemType === 'mix')) {
+            card.addEventListener('click', () => {
+                const videoId = card.dataset.id;
+                const title = card.dataset.title;
+                const channel = card.dataset.channel;
+                _startQueue(videoId, title, channel, playlistId);
+            });
+        } else {
+            card.addEventListener('click', () => {
+                const videoId = card.dataset.id;
+                const title = card.dataset.title;
+                const channel = card.dataset.channel;
+                _closeQueue();
+                history.pushState({ view: 'video', videoId, title, channel, duration: 0 }, '', `/watch?v=${videoId}`);
+                playVideo(videoId, title, channel, 0);
+            });
+        }
     });
 }
+
+
+// ── Queue Mode ──────────────────────────────────────────────────────────────
+
+const queueSection = document.getElementById('queue-section');
+const queueTitle = document.getElementById('queue-title');
+const queuePosition = document.getElementById('queue-position');
+const queueList = document.getElementById('queue-list');
+const queueToggleArea = document.getElementById('queue-toggle-area');
+const queueHideIndicator = document.getElementById('queue-hide-indicator');
+const queueCloseArea = document.getElementById('queue-close-area');
+
+async function _startQueue(videoId, playlistTitle, channel, playlistId) {
+    // Navigate to the video (don't pass playlist title as video title)
+    cacheListView();
+    history.pushState({ view: 'video', videoId, title: '', channel: '', duration: 0 }, '', `/watch?v=${videoId}`);
+    showVideoView();
+    playVideo(videoId, '', '', 0);
+
+    // Fetch playlist contents
+    try {
+        const resp = await fetch(`/api/playlist-contents?video_id=${videoId}&playlist_id=${encodeURIComponent(playlistId)}`);
+        if (currentVideoId !== videoId) return; // user navigated away
+        const data = await resp.json();
+
+        if (data.videos && data.videos.length > 0) {
+            _queue = {
+                title: data.title || 'Queue',
+                videos: data.videos,
+                currentIndex: data.videos.findIndex(v => v.id === videoId),
+                playlistId: playlistId,
+            };
+            if (_queue.currentIndex === -1) _queue.currentIndex = 0;
+            _queueCollapsed = false;
+            _renderQueue();
+        }
+    } catch (err) {
+        console.error('Failed to fetch playlist contents:', err);
+        // Show brief error in queue section
+        queueTitle.textContent = 'Queue unavailable';
+        queueSection.classList.remove('hidden');
+        queueList.innerHTML = '<div style="padding: 12px; color: #ff4444; font-size: 13px;">Failed to load playlist</div>';
+        setTimeout(() => { if (!_queue) queueSection.classList.add('hidden'); }, 4000);
+    }
+}
+
+function _renderQueue() {
+    if (!_queue) {
+        queueSection.classList.add('hidden');
+        return;
+    }
+
+    queueSection.classList.remove('hidden');
+    queueTitle.textContent = _queue.title;
+    queuePosition.textContent = `${_queue.currentIndex + 1}/${_queue.videos.length}`;
+
+    queueList.classList.toggle('collapsed', _queueCollapsed);
+    queueHideIndicator.innerHTML = _queueCollapsed ? '&#9650;' : '&#9660;';
+
+    queueList.innerHTML = _queue.videos.map((v, i) => {
+        const active = i === _queue.currentIndex ? ' active' : '';
+        return `<div class="queue-item${active}" data-index="${i}" data-id="${escapeAttr(v.id)}">
+            <span class="queue-item-index">${i + 1}</span>
+            <div class="queue-item-thumb">
+                <img src="${escapeAttr(v.thumbnail)}" alt="" loading="lazy">
+            </div>
+            <div class="queue-item-info">
+                <div class="queue-item-title">${escapeHtml(v.title)}</div>
+                ${v.channel ? `<div class="queue-item-channel">${escapeHtml(v.channel)}</div>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+
+    // Attach click listeners
+    queueList.querySelectorAll('.queue-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const idx = parseInt(item.dataset.index);
+            _playQueueItem(idx);
+        });
+    });
+
+    // Scroll active item into view
+    const activeItem = queueList.querySelector('.queue-item.active');
+    if (activeItem) {
+        activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+}
+
+function _playQueueItem(index) {
+    if (!_queue || index < 0 || index >= _queue.videos.length) return;
+    _queue.currentIndex = index;
+    const v = _queue.videos[index];
+    history.pushState({ view: 'video', videoId: v.id, title: v.title, channel: v.channel, duration: 0 }, '', `/watch?v=${v.id}`);
+    playVideo(v.id, v.title, v.channel, 0);
+    _renderQueue();
+}
+
+function _advanceQueue() {
+    if (!_queue) return;
+    // Only auto-advance if the current video is actually the queue's current item
+    const expectedId = _queue.videos[_queue.currentIndex]?.id;
+    if (currentVideoId !== expectedId) return;
+    const nextIndex = _queue.currentIndex + 1;
+    if (nextIndex < _queue.videos.length) {
+        _playQueueItem(nextIndex);
+    } else {
+        // Queue finished
+        queuePosition.textContent = 'Finished';
+    }
+}
+
+function _closeQueue() {
+    _queue = null;
+    queueSection.classList.add('hidden');
+}
+
+queueToggleArea.addEventListener('click', () => {
+    _queueCollapsed = !_queueCollapsed;
+    queueList.classList.toggle('collapsed', _queueCollapsed);
+    queueHideIndicator.innerHTML = _queueCollapsed ? '&#9650;' : '&#9660;';
+});
+
+queueCloseArea.addEventListener('click', () => {
+    _closeQueue();
+});
+
+// Auto-advance: listen for video ended
+videoPlayer.addEventListener('ended', () => {
+    if (_queue) {
+        _advanceQueue();
+    }
+});
 
 
 // ── List View Cache ─────────────────────────────────────────────────────────
@@ -293,7 +650,8 @@ function cacheListView() {
         cursor: currentCursor,
         html: videoGrid.innerHTML,
         headerVisible: !listHeader.classList.contains('hidden'),
-        headerTitle: listTitle.textContent
+        headerTitle: listTitle.textContent,
+        searchRawResults: _searchRawResults,
     };
 }
 
@@ -319,6 +677,14 @@ function restoreListCache() {
         if (hasMoreResults) {
             loadMoreContainer.classList.remove('hidden');
             loadMoreObserver.observe(loadMoreContainer);
+        }
+
+        // Restore filter toggles and channel tabs
+        if (listViewMode === 'search' && listViewCache.searchRawResults?.length > 0) {
+            _searchRawResults = listViewCache.searchRawResults;
+            _renderFilterToggles();
+        } else if (listViewMode === 'channel' || listViewMode === 'channel_playlists') {
+            _renderChannelTabs(currentChannelId);
         }
     }
 }

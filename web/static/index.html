@@ -75,8 +75,21 @@
                         </div>
                     </div>
 
-                    <!-- Right column: Related videos -->
+                    <!-- Right column: Queue + Related videos -->
                     <div class="video-sidebar">
+                        <div id="queue-section" class="hidden">
+                            <div class="queue-header">
+                                <div class="queue-toggle-area" id="queue-toggle-area">
+                                    <h3 id="queue-title">Queue</h3>
+                                    <span id="queue-position"></span>
+                                    <span id="queue-hide-indicator" class="queue-arrow">&#9660;</span>
+                                </div>
+                                <div class="queue-close-area" id="queue-close-area" title="Close queue">
+                                    <span>&times;</span>
+                                </div>
+                            </div>
+                            <div id="queue-list" class="queue-list"></div>
+                        </div>
                         <h3>Related Videos</h3>
                         <div id="related-videos"></div>
                     </div>
