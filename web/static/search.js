@@ -34,7 +34,7 @@ const loadMoreObserver = new IntersectionObserver((entries) => {
 
 // ── Search ──────────────────────────────────────────────────────────────────
 
-async function searchVideos(query) {
+async function searchVideos(query, { pushState = true } = {}) {
     if (!query.trim()) return;
 
     listViewMode = 'search';
@@ -45,11 +45,15 @@ async function searchVideos(query) {
     _searchRawResults = [];
     const gen = ++_listGeneration;
 
-    if (window.location.pathname !== '/') {
-        history.pushState({ view: 'search' }, '', '/');
+    const searchUrl = `/results?search_query=${encodeURIComponent(query)}`;
+    if (pushState) {
+        history.pushState({ view: 'search', query }, '', searchUrl);
+    } else {
+        history.replaceState({ view: 'search', query }, '', searchUrl);
     }
 
     showListView();
+    searchInput.value = query;
     _removeChannelTabs();
     listHeader.classList.add('hidden');
     videoGrid.innerHTML = '';
@@ -168,7 +172,7 @@ async function loadChannelVideos(channelId, channelName) {
     listTitle.textContent = channelName || 'Channel';
     clearListBtn.classList.add('hidden');
     _removeFilterToggles();
-    _renderChannelTabs(channelId);
+    _removeChannelTabs();
     videoGrid.innerHTML = '';
     noResults.classList.add('hidden');
     loadMoreContainer.classList.add('hidden');
@@ -176,7 +180,11 @@ async function loadChannelVideos(channelId, channelName) {
     showLoadingCard(true);
 
     try {
-        const response = await fetch(`/api/channel/${channelId}`);
+        // Fetch videos and probe playlists in parallel
+        const [response, playlistsResp] = await Promise.all([
+            fetch(`/api/channel/${channelId}`),
+            fetch(`/api/channel/${channelId}/playlists`).catch(() => null),
+        ]);
         if (gen !== _listGeneration) return;
         const data = await response.json();
 
@@ -185,13 +193,32 @@ async function loadChannelVideos(channelId, channelName) {
             throw new Error(msg || 'Failed to load channel');
         }
 
+        // Check if playlists exist
+        let hasPlaylists = false;
+        if (playlistsResp && playlistsResp.ok) {
+            const plData = await playlistsResp.json();
+            hasPlaylists = plData.results && plData.results.length > 0;
+        }
+        const hasVideos = data.results.length > 0;
+
         showLoadingCard(false);
 
         if (data.channel) {
             listTitle.textContent = data.channel;
         }
 
-        if (data.results.length === 0) {
+        // Show tabs only if both have content
+        if (hasVideos && hasPlaylists) {
+            _renderChannelTabs(channelId);
+        } else if (!hasVideos && hasPlaylists) {
+            // No videos, only playlists — switch to playlists directly
+            _channelTab = 'playlists';
+            history.replaceState({ view: 'channel', channelId, channelName: listTitle.textContent, tab: 'playlists' }, '', `/channel/${channelId}/playlists`);
+            _loadChannelPlaylists(channelId);
+            return;
+        }
+
+        if (!hasVideos) {
             noResults.classList.remove('hidden');
             hasMoreResults = false;
         } else {
@@ -231,9 +258,12 @@ function _renderChannelTabs(channelId) {
         btn.addEventListener('click', () => {
             if (_channelTab === tab) return;
             _channelTab = tab;
+            const channelName = listTitle.textContent;
+            const url = tab === 'playlists' ? `/channel/${channelId}/playlists` : `/channel/${channelId}`;
+            history.pushState({ view: 'channel', channelId, channelName, tab }, '', url);
             tabs.querySelectorAll('.channel-tab').forEach(b => b.classList.toggle('active', b === btn));
             if (tab === 'videos') {
-                loadChannelVideos(channelId, listTitle.textContent);
+                loadChannelVideos(channelId, channelName);
             } else {
                 _loadChannelPlaylists(channelId);
             }
@@ -243,6 +273,31 @@ function _renderChannelTabs(channelId) {
 
     // Insert after list header
     listHeader.insertAdjacentElement('afterend', tabs);
+}
+
+async function loadChannelPlaylists(channelId, channelName) {
+    _channelTab = 'playlists';
+    currentChannelId = channelId;
+    currentQuery = '';
+
+    showListView();
+    listHeader.classList.remove('hidden');
+    listTitle.textContent = channelName || 'Channel';
+    clearListBtn.classList.add('hidden');
+    _removeFilterToggles();
+    _removeChannelTabs();
+
+    _loadChannelPlaylists(channelId);
+
+    // Probe videos in background to decide whether to show tabs
+    const gen = _listGeneration;
+    fetch(`/api/channel/${channelId}`).then(r => r.ok ? r.json() : null).then(data => {
+        if (gen !== _listGeneration) return;
+        if (data && data.results && data.results.length > 0) {
+            if (data.channel) listTitle.textContent = data.channel;
+            _renderChannelTabs(channelId);
+        }
+    }).catch(() => {});
 }
 
 async function _loadChannelPlaylists(channelId) {
@@ -357,7 +412,8 @@ function createVideoCard(item) {
         const badgeLabel = item.type === 'playlist' ? 'Playlist' : 'Mix';
         const countBadge = item.video_count ? `<span class="video-count">${escapeHtml(item.video_count)}</span>` : '';
         const firstVid = item.first_video_id || item.id;
-        return `<a class="video-card" href="/watch?v=${escapeAttr(firstVid)}" data-id="${escapeAttr(firstVid)}" data-title="${escapeAttr(item.title)}" data-channel="${escapeAttr(item.channel || '')}" data-duration="0" data-playlist-id="${escapeAttr(item.playlist_id || item.id)}" data-item-type="${escapeAttr(item.type)}">
+        const plId = item.playlist_id || item.id;
+        return `<a class="video-card" href="/watch?v=${escapeAttr(firstVid)}&list=${escapeAttr(plId)}" data-id="${escapeAttr(firstVid)}" data-title="${escapeAttr(item.title)}" data-channel="${escapeAttr(item.channel || '')}" data-duration="0" data-playlist-id="${escapeAttr(plId)}" data-item-type="${escapeAttr(item.type)}">
             <div class="thumbnail-container">
                 <img src="${escapeAttr(item.thumbnail)}" alt="${escapeHtml(item.title)}" loading="lazy">
                 ${countBadge}
@@ -478,7 +534,8 @@ function createRelatedCard(video) {
         : `data-id="${escapeAttr(video.id)}"`;
 
     const vid = isMixOrPlaylist ? (video.first_video_id || video.id) : video.id;
-    return `<a class="related-card" href="/watch?v=${escapeAttr(vid)}" ${dataAttrs} data-title="${escapeAttr(video.title)}" data-channel="${escapeAttr(video.channel || '')}" data-duration="0">
+    const relHref = isMixOrPlaylist ? `/watch?v=${escapeAttr(vid)}&list=${escapeAttr(video.playlist_id || video.id)}` : `/watch?v=${escapeAttr(vid)}`;
+    return `<a class="related-card" href="${relHref}" ${dataAttrs} data-title="${escapeAttr(video.title)}" data-channel="${escapeAttr(video.channel || '')}" data-duration="0">
         <div class="thumbnail-container">
             <img src="${escapeAttr(video.thumbnail)}" alt="${escapeHtml(video.title)}" loading="lazy">
             ${badge}
@@ -533,11 +590,13 @@ const queueCloseArea = document.getElementById('queue-close-area');
 async function _startQueue(videoId, playlistTitle, channel, playlistId) {
     // Navigate to the video (don't pass playlist title as video title)
     cacheListView();
-    history.pushState({ view: 'video', videoId, title: '', channel: '', duration: 0 }, '', `/watch?v=${videoId}`);
+    history.pushState({ view: 'video', videoId, title: '', channel: '', duration: 0, playlistId }, '', `/watch?v=${videoId}&list=${playlistId}`);
     showVideoView();
     playVideo(videoId, '', '', 0);
+    _loadQueue(videoId, playlistId);
+}
 
-    // Fetch playlist contents
+async function _loadQueue(videoId, playlistId) {
     try {
         const resp = await fetch(`/api/playlist-contents?video_id=${videoId}&playlist_id=${encodeURIComponent(playlistId)}`);
         if (currentVideoId !== videoId) return; // user navigated away
@@ -556,7 +615,6 @@ async function _startQueue(videoId, playlistTitle, channel, playlistId) {
         }
     } catch (err) {
         console.error('Failed to fetch playlist contents:', err);
-        // Show brief error in queue section
         queueTitle.textContent = 'Queue unavailable';
         queueSection.classList.remove('hidden');
         queueList.innerHTML = '<div style="padding: 12px; color: #ff4444; font-size: 13px;">Failed to load playlist</div>';
@@ -610,7 +668,7 @@ function _playQueueItem(index) {
     if (!_queue || index < 0 || index >= _queue.videos.length) return;
     _queue.currentIndex = index;
     const v = _queue.videos[index];
-    history.pushState({ view: 'video', videoId: v.id, title: v.title, channel: v.channel, duration: 0 }, '', `/watch?v=${v.id}`);
+    history.pushState({ view: 'video', videoId: v.id, title: v.title, channel: v.channel, duration: 0, playlistId: _queue.playlistId }, '', `/watch?v=${v.id}&list=${_queue.playlistId}`);
     playVideo(v.id, v.title, v.channel, 0);
     _renderQueue();
 }

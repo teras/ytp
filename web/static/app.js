@@ -241,13 +241,51 @@ function navigateToChannel(channelId, channelName) {
     loadChannelVideos(channelId, channelName);
 }
 
+const _handleCache = {}; // @handle → UCXXXX
+
+async function resolveHandleAndLoad(handle, tab) {
+    try {
+        let channelId = _handleCache[handle];
+        if (!channelId) {
+            const resp = await fetch(`/api/resolve-handle/${encodeURIComponent(handle)}`);
+            if (!resp.ok) throw new Error('Channel not found');
+            const data = await resp.json();
+            channelId = data.channel_id;
+            _handleCache[handle] = channelId;
+        }
+        // Keep the @handle URL visible
+        const url = tab === 'playlists' ? `/@${handle}/playlists` : `/@${handle}`;
+        history.replaceState({ view: 'channel', channelId, channelName: '', tab, handle }, '', url);
+        if (tab === 'playlists') {
+            loadChannelPlaylists(channelId, '');
+        } else {
+            loadChannelVideos(channelId, '');
+        }
+    } catch (e) {
+        document.getElementById('video-grid').innerHTML = `<p class="error">Channel @${escapeHtml(handle)} not found</p>`;
+    }
+}
+
 window.addEventListener('popstate', (e) => {
     if (e.state?.view === 'video') {
         showVideoView();
         playVideo(e.state.videoId, e.state.title, e.state.channel, e.state.duration);
+        if (e.state.playlistId) {
+            if (_queue?.playlistId === e.state.playlistId) {
+                const idx = _queue.videos.findIndex(v => v.id === e.state.videoId);
+                if (idx !== -1) _queue.currentIndex = idx;
+                _renderQueue();
+            } else {
+                _loadQueue(e.state.videoId, e.state.playlistId);
+            }
+        }
     } else if (e.state?.view === 'channel') {
         showListView();
-        loadChannelVideos(e.state.channelId, e.state.channelName);
+        if (e.state.tab === 'playlists') {
+            loadChannelPlaylists(e.state.channelId, e.state.channelName);
+        } else {
+            loadChannelVideos(e.state.channelId, e.state.channelName);
+        }
     } else if (e.state?.view === 'history') {
         showListView();
         loadHistory();
@@ -256,7 +294,11 @@ window.addEventListener('popstate', (e) => {
         loadFavorites();
     } else if (e.state?.view === 'search') {
         showListView();
-        restoreListCache();
+        if (listViewCache && listViewCache.query === e.state.query) {
+            restoreListCache();
+        } else if (e.state.query) {
+            searchVideos(e.state.query, { pushState: false });
+        }
     } else {
         // Default (home) = watch history
         showListView();
@@ -270,14 +312,41 @@ function handleInitialRoute() {
 
     if (path === '/watch' && params.get('v')) {
         const videoId = params.get('v');
-        history.replaceState({ view: 'video', videoId, title: '', channel: '', duration: 0 }, '', `/watch?v=${videoId}`);
+        const listId = params.get('list');
+        const url = listId ? `/watch?v=${videoId}&list=${listId}` : `/watch?v=${videoId}`;
+        history.replaceState({ view: 'video', videoId, title: '', channel: '', duration: 0, playlistId: listId || undefined }, '', url);
         showVideoView();
         playVideo(videoId, '', '', 0);
-    } else if (path.startsWith('/channel/')) {
-        const channelId = path.split('/channel/')[1];
-        history.replaceState({ view: 'channel', channelId, channelName: '' }, '', path);
+        if (listId) _loadQueue(videoId, listId);
+    } else if (path.startsWith('/@')) {
+        const rest = path.slice(2); // remove /@
+        const isPlaylists = rest.endsWith('/playlists');
+        const handle = isPlaylists ? rest.slice(0, -'/playlists'.length) : rest;
+        const tab = isPlaylists ? 'playlists' : 'videos';
         showListView();
-        loadChannelVideos(channelId, '');
+        resolveHandleAndLoad(handle, tab);
+    } else if (path.startsWith('/channel/')) {
+        const rest = path.slice('/channel/'.length);
+        const isPlaylists = rest.endsWith('/playlists');
+        const channelId = isPlaylists ? rest.slice(0, -'/playlists'.length) : rest;
+        const tab = isPlaylists ? 'playlists' : 'videos';
+        history.replaceState({ view: 'channel', channelId, channelName: '', tab }, '', path);
+        showListView();
+        if (isPlaylists) {
+            loadChannelPlaylists(channelId, '');
+        } else {
+            loadChannelVideos(channelId, '');
+        }
+    } else if (path === '/results') {
+        const query = params.get('search_query');
+        if (query) {
+            showListView();
+            searchVideos(query, { pushState: false });
+        } else {
+            history.replaceState({ view: 'history' }, '', '/');
+            showListView();
+            loadHistory();
+        }
     } else if (path === '/history') {
         history.replaceState({ view: 'history' }, '', '/history');
         showListView();
@@ -735,6 +804,13 @@ videoPlayer.addEventListener('timeupdate', () => {
 
 searchBtn.addEventListener('click', () => searchVideos(searchInput.value));
 searchInput.addEventListener('keypress', e => e.key === 'Enter' && searchVideos(searchInput.value));
+
+document.getElementById('logo-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    history.pushState({ view: 'history' }, '', '/');
+    showListView();
+    loadHistory();
+});
 
 videoPlayer.addEventListener('error', () => {
     console.log('Video error:', videoPlayer.error?.message);

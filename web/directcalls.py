@@ -370,6 +370,36 @@ async def search_next(continuation_token: str) -> tuple[list[dict], str | None]:
     return results, token
 
 
+# ── Handle → Channel ID ──────────────────────────────────────────────────────
+
+_handle_cache: dict[str, str] = {}  # @handle → UCXXXX
+
+
+async def resolve_handle(handle: str) -> str | None:
+    """Resolve a YouTube @handle to a channel ID (UCXXXX).
+
+    Uses InnerTube navigation/resolve_url endpoint.  Results are cached
+    in-memory (handles don't change).
+    Returns channel ID or None if not found.
+    """
+    handle_lower = handle.lower()
+    if handle_lower in _handle_cache:
+        return _handle_cache[handle_lower]
+
+    url = f"https://www.youtube.com/@{handle}"
+    try:
+        data = await _innertube_post("navigation/resolve_url", {"url": url})
+        browse_id = (data.get("endpoint", {})
+                     .get("browseEndpoint", {})
+                     .get("browseId"))
+        if browse_id and browse_id.startswith("UC"):
+            _handle_cache[handle_lower] = browse_id
+            return browse_id
+    except Exception as e:
+        log.error(f"Handle resolve error for @{handle}: {e}")
+    return None
+
+
 # ── Channel ──────────────────────────────────────────────────────────────────
 
 # Protobuf-encoded params for the "Videos" tab, sorted by "Recently uploaded"

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
 from auth import require_auth, get_session
 from helpers import VIDEO_ID_RE
 from iterators import create_search, create_channel, create_channel_playlists, fetch_more
-from directcalls import fetch_related, fetch_playlist_contents
+from directcalls import fetch_related, fetch_playlist_contents, resolve_handle
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,20 @@ async def get_related_videos(video_id: str, auth: bool = Depends(require_auth)):
         raise HTTPException(status_code=400, detail="Invalid video ID")
     results = await fetch_related(video_id)
     return {"results": results}
+
+
+_HANDLE_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+
+@router.get("/resolve-handle/{handle}")
+async def resolve_channel_handle(handle: str, auth: bool = Depends(require_auth)):
+    """Resolve a YouTube @handle to a channel ID."""
+    if not _HANDLE_RE.match(handle):
+        raise HTTPException(status_code=400, detail="Invalid handle")
+    channel_id = await resolve_handle(handle)
+    if not channel_id:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return {"channel_id": channel_id}
 
 
 @router.get("/channel/{channel_id}")

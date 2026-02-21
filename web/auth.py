@@ -229,6 +229,26 @@ async def channel_page(request: Request, channel_id: str):
     return _serve_spa(request)
 
 
+@router.get("/channel/{channel_id}/playlists")
+async def channel_playlists_page(request: Request, channel_id: str):
+    return _serve_spa(request)
+
+
+@router.get("/@{handle}")
+async def handle_page(request: Request, handle: str):
+    return _serve_spa(request)
+
+
+@router.get("/@{handle}/playlists")
+async def handle_playlists_page(request: Request, handle: str):
+    return _serve_spa(request)
+
+
+@router.get("/results")
+async def results_page(request: Request):
+    return _serve_spa(request)
+
+
 @router.get("/history")
 async def history_page(request: Request):
     return _serve_spa(request)
